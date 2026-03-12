@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fetching Transcript...</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background: #f0f2f5;
+            text-align: center;
+            padding: 20px;
+        }
+        .status-icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .success { color: #4caf50; }
+        .error { color: #f44336; }
+        .loading { animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        h2 { margin: 0 0 10px 0; color: #333; }
+        p { color: #666; margin: 0; }
+        .close-btn {
+            margin-top: 20px;
+            padding: 8px 16px;
+            background: #333;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="status-icon loading">🔄</div>
+        <h2>Fetching Transcript...</h2>
+        <p>Please wait while we grab the text.</p>
+    </div>
+
+    <div id="success" style="display: none;">
+        <div class="status-icon success">✅</div>
+        <h2 id="success-title">Success!</h2>
+        <p id="success-msg">Transcript saved to database.</p>
+        <button class="close-btn" onclick="window.close()">Close Window</button>
+    </div>
+
+    <div id="error" style="display: none;">
+        <div class="status-icon error">❌</div>
+        <h2>Failed</h2>
+        <p id="error-msg">Something went wrong.</p>
+        <button class="close-btn" onclick="window.close()">Close Window</button>
+    </div>
+
+    <!-- Paste transcript (IP block workaround) -->
+    <div id="paste" style="display: none; max-width: 700px; width: 100%;">
+        <div class="status-icon">📋</div>
+        <h2>Paste transcript</h2>
+        <p id="paste-video-title" style="color:#333; margin-bottom: 8px;"></p>
+        <p style="color:#666; font-size: 14px; margin-bottom: 12px;">Copy the transcript from the YouTube page, then paste below and click Save.</p>
+        <textarea id="paste-textarea" placeholder="Paste transcript here..." style="width: 100%; height: 280px; padding: 12px; font-family: inherit; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; resize: vertical;"></textarea>
+        <div style="margin-top: 12px;">
+            <button class="close-btn" id="paste-save-btn" style="margin-right: 8px;">Save &amp; vectorize</button>
+            <button class="close-btn" onclick="window.close()" style="background: #666;">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const videoUrl = urlParams.get('url');
+        const videoTitle = urlParams.get('title');
+        const videoChannel = urlParams.get('channel');
+
+        if (!videoUrl) {
+            showError('No URL provided');
+        } else {
+            fetch('/api/fetch-transcript', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    url: videoUrl,
+                    title: videoTitle,
+                    channel: videoChannel
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    if (data.paste_required) {
+                        showPasteForm(data);
+                    } else if (data.message === 'Transcript already exists') {
+                        showSuccess('Already Got It!', 'You already have the transcript for this video.');
+                    } else if (data.warning) {
+                        showSuccess('Video Saved!', data.message || 'Video saved (no transcript available).');
+                    } else {
+                        showSuccess('Saved!', data.message || 'Video and transcript saved to database.');
+                    }
+                } else {
+                    showError(data.error || 'Unknown error');
+                }
+            })
+            .catch(err => {
+                showError(err.message);
+            });
+        }
+
+        function showPasteForm(data) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('paste').style.display = 'block';
+            document.getElementById('paste-video-title').textContent = (data.title || 'Video') + ' — ' + (data.channel || '');
+            document.getElementById('paste-textarea').value = '';
+            document.getElementById('paste-textarea').focus();
+            document.getElementById('paste-save-btn').onclick = function() {
+                const text = document.getElementById('paste-textarea').value.trim();
+                if (!text) {
+                    alert('Paste the transcript first.');
+                    return;
+                }
+                this.disabled = true;
+                this.textContent = 'Saving...';
+                fetch('/api/save-pasted-transcript', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        video_id: data.video_id,
+                        title: data.title,
+                        channel: data.channel,
+                        url: data.url,
+                        transcript_text: text
+                    })
+                })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        showSuccess('Saved!', 'Transcript saved and vectorizing in background.');
+                    } else {
+                        showError(d.error || 'Save failed');
+                    }
+                })
+                .catch(err => {
+                    showError(err.message);
+                });
+            };
+        }
+
+        function showSuccess(title, msg) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('success').style.display = 'block';
+            document.getElementById('paste').style.display = 'none';
+            if (title) document.getElementById('success-title').textContent = title;
+            if (msg) document.getElementById('success-msg').textContent = msg;
+            setTimeout(() => window.close(), 2000);
+        }
+
+        function showError(msg) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('error-msg').textContent = msg;
+        }
+    </script>
+</body>
+</html>
+
