@@ -159,7 +159,11 @@ class TranscriptDatabase:
             print(f"[OK] Transcript database ready: {self.db_path}")
 
     def add_video(self, video_id: str, title: str, channel: str, url: str) -> bool:
-        """Add a video to the database"""
+        """Add a video to the database.
+
+        Note: this sets created_at (when the video record was first seen/indexed),
+        not the user's watch date.
+        """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -208,7 +212,9 @@ class TranscriptDatabase:
                     (video_id, text, language, confidence, local_time),
                 )
 
-                # Update video status (use local time)
+                # Update video status (use local time). We do NOT touch watch_date here;
+                # that is reserved for "when the user watched/grabbed the video" and is
+                # set explicitly by the grabber.
                 local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(
                     """
@@ -254,6 +260,32 @@ class TranscriptDatabase:
                 conn.commit()
         except Exception as e:
             print(f"[ERROR] Error enqueuing processing tasks for {video_id}: {e}")
+
+    def set_watch_date(self, video_id: str, when: Optional[datetime] = None) -> None:
+        """
+        Set the watch_date for a video to the given datetime (or now).
+
+        watch_date represents when the USER watched or grabbed the video,
+        not the upload date.
+        """
+        if when is None:
+            when = datetime.now()
+        ts = when.strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE videos
+                    SET watch_date = ?
+                    WHERE video_id = ?
+                    """,
+                    (ts, video_id),
+                )
+                conn.commit()
+        except Exception as e:
+            print(f"[ERROR] Error setting watch_date for {video_id}: {e}")
 
     def save_shorty(self, video_id: str, shorty_text: str) -> bool:
         """Attach a Shorty to the most recent transcript row for a video."""

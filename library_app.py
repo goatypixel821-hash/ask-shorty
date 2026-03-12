@@ -112,7 +112,7 @@ def get_videos_page(filters: Dict[str, Any], page: int) -> List[sqlite3.Row]:
             v.video_id,
             v.title,
             v.channel,
-            v.created_at,
+            v.watch_date,
             (SELECT json_extract(v2.json_metadata, '$.upload_date')
              FROM videos v2 WHERE v2.video_id = v.video_id) AS upload_date,
             EXISTS (
@@ -143,6 +143,7 @@ def get_video_detail(video_id: str) -> Dict[str, Any]:
             v.video_id,
             v.title,
             v.channel,
+            v.watch_date,
             json_extract(v.json_metadata, '$.upload_date') AS upload_date
         FROM videos v
         WHERE v.video_id = ?

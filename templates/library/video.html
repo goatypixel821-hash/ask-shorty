@@ -171,7 +171,8 @@
     </p>
     <h1>{{ video['title'] or "Untitled video" }}</h1>
     <p class="sub">
-      Video ID {{ video['video_id'] }} · {{ video['channel'] or "Unknown channel" }} · {{ video['upload_date'] or "Unknown date" }}
+      Video ID {{ video['video_id'] }} · {{ video['channel'] or "Unknown channel" }} ·
+      Watched: {{ video['watch_date'] or "Unknown" }} · Uploaded: {{ video['upload_date'] or "Unknown" }}
     </p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}

@@ -148,7 +148,8 @@
         <tr>
           <th style="width: 30%;">Title</th>
           <th style="width: 18%;">Channel</th>
-          <th style="width: 16%;">Upload date</th>
+          <th style="width: 14%;">Watch date</th>
+          <th style="width: 12%;">Upload date</th>
           <th style="width: 10%;">Shorty</th>
           <th style="width: 10%;">Questions</th>
           <th style="width: 10%;">Entities</th>
@@ -163,6 +164,7 @@
             </a>
           </td>
           <td>{{ v['channel'] or "Unknown" }}</td>
+          <td>{{ v['watch_date'] or "" }}</td>
           <td>{{ v['upload_date'] or "" }}</td>
           <td>
             {% if v['has_shorty'] %}

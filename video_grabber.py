@@ -300,7 +300,7 @@ def fetch_transcript_endpoint():
         
         logger.info(f"📥 Grabbing video: {video_id} - {title}")
         
-        # Fetch transcript (this also adds video to DB)
+        # Fetch transcript (this also adds/updates video row in DB)
         _out("🔍 Fetching transcript...")
         result = transcript_fetcher.fetch_transcript_from_url(url, title=title, channel=channel)
         transcript_success = result.get('success', False)
@@ -325,6 +325,12 @@ def fetch_transcript_endpoint():
         except Exception as e:
             _out(f"⚠️ Metadata fetch warning: {e}")
             metadata = None
+        # Record watch_date as "when the user grabbed/watched this video"
+        try:
+            db.set_watch_date(video_id)
+        except Exception as e:
+            _out(f"⚠️ Failed to set watch_date for {video_id}: {e}")
+
         response_data = {
             'success': True,
             'video_id': video_id,
@@ -408,6 +414,11 @@ def save_pasted_transcript():
         success = transcript_fetcher.db.save_transcript(video_id, transcript_text)
         if not success:
             return jsonify({'success': False, 'error': 'Failed to save transcript'}), 500
+        # Record watch_date when user manually pastes a transcript (also a "watched" signal)
+        try:
+            transcript_fetcher.db.set_watch_date(video_id)
+        except Exception as e:
+            _out(f"⚠️ Failed to set watch_date for {video_id} (pasted): {e}")
         # Log confirms: we save only the cleaned text (timestamp-only lines removed)
         _out(f"\n✅ Pasted transcript saved: {video_id} ({len(transcript_text)} chars saved, timestamps removed)")
         _out("🚀 Vectorizing (background)...")
