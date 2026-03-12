@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ask Shorty</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0b1020;
+      color: #f5f5f7;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .shell {
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 24px 20px 40px;
+    }
+    .card {
+      background: radial-gradient(circle at top left, #1f2937, #020617);
+      border-radius: 20px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      box-shadow: 0 18px 45px rgba(15, 23, 42, 0.9);
+      padding: 24px 24px 28px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 26px;
+      letter-spacing: 0.03em;
+    }
+    .tagline {
+      margin: 0 0 20px;
+      color: #9ca3af;
+      font-size: 14px;
+    }
+    label {
+      font-size: 13px;
+      color: #d1d5db;
+      display: block;
+      margin-bottom: 4px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 80px;
+      resize: vertical;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #4b5563;
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    textarea:focus {
+      outline: 2px solid #38bdf8;
+      outline-offset: 1px;
+      border-color: transparent;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #4b5563;
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      font-size: 13px;
+    }
+    input[type="text"]:focus {
+      outline: 2px solid #38bdf8;
+      outline-offset: 1px;
+      border-color: transparent;
+    }
+    button {
+      border-radius: 999px;
+      border: none;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      color: #022c22;
+      box-shadow: 0 10px 25px rgba(22, 163, 74, 0.55);
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+      box-shadow: none;
+    }
+    .answer-card {
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(148, 163, 184, 0.4);
+    }
+    .answer-title {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #9ca3af;
+      margin-bottom: 8px;
+    }
+    .answer-box {
+      background: rgba(15, 23, 42, 0.85);
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      padding: 14px 14px 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .meta {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #9ca3af;
+    }
+    .error {
+      margin-top: 10px;
+      color: #fecaca;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="card">
+      <h1>Ask Shorty</h1>
+      <p class="tagline">Ask anything from your indexed videos &amp; podcasts. Answers come from transcripts, Shorties, and synthetic questions.</p>
+
+      <label for="question">Question</label>
+      <textarea id="question" placeholder="e.g. What did I watch about DCS-3000 and Red Hook?"></textarea>
+
+      <div class="controls">
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <label for="video-filter" style="margin:0;font-size:11px;">Limit to video IDs (optional, comma-separated)</label>
+          <input id="video-filter" type="text" placeholder="e.g. dQw4w9WgXcQ, abc123xyz89" />
+        </div>
+        <div style="flex:1;"></div>
+        <button id="ask-btn">
+          <span>Ask Shorty</span>
+        </button>
+      </div>
+
+      <div id="error" class="error" style="display:none;"></div>
+
+      <div class="answer-card" id="answer-card" style="display:none;">
+        <div class="answer-title">Answer</div>
+        <div class="answer-box" id="answer-box"></div>
+        <div class="meta" id="meta-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const askBtn = document.getElementById("ask-btn");
+    const qEl = document.getElementById("question");
+    const vidEl = document.getElementById("video-filter");
+    const errEl = document.getElementById("error");
+    const answerCard = document.getElementById("answer-card");
+    const answerBox = document.getElementById("answer-box");
+    const metaBox = document.getElementById("meta-box");
+
+    async function doAsk() {
+      const q = qEl.value.trim();
+      const rawVideos = vidEl.value.trim();
+      errEl.style.display = "none";
+      errEl.textContent = "";
+      answerCard.style.display = "none";
+      answerBox.textContent = "";
+      metaBox.textContent = "";
+
+      if (!q) {
+        errEl.textContent = "Please enter a question.";
+        errEl.style.display = "block";
+        return;
+      }
+
+      askBtn.disabled = true;
+      askBtn.textContent = "Thinking...";
+      try {
+        let video_ids = null;
+        if (rawVideos) {
+          video_ids = rawVideos.split(",").map(v => v.trim()).filter(Boolean);
+        }
+        const resp = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q, video_ids })
+        });
+        const data = await resp.json();
+        if (!data.success) {
+          throw new Error(data.error || "Unknown error");
+        }
+        answerBox.textContent = data.answer || "(No answer returned.)";
+        const ctx = data.used_context || [];
+        metaBox.textContent = ctx.length
+          ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`
+          : "No context details available.";
+        answerCard.style.display = "block";
+      } catch (e) {
+        errEl.textContent = e.message || String(e);
+        errEl.style.display = "block";
+      } finally {
+        askBtn.disabled = false;
+        askBtn.textContent = "Ask Shorty";
+      }
+    }
+
+    askBtn.addEventListener("click", doAsk);
+    qEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        doAsk();
+      }
+    });
+  </script>
+</body>
+</html>
+

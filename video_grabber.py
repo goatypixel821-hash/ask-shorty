@@ -40,6 +40,10 @@ from pathlib import Path
 # Import only what we need
 from simple_transcript_fetcher import SimpleTranscriptFetcher
 from video_downloader import VideoDownloader
+from transcript_database import TranscriptDatabase
+from shorty_generator import generate_shorty, generate_synthetic_questions
+from entity_extractor import extract_entities, store_entities
+from transcript_rag import TranscriptRAG
 
 # Setup logging
 logging.basicConfig(
@@ -84,6 +88,8 @@ def _out(msg: str):
 # Initialize only what we need
 transcript_fetcher = SimpleTranscriptFetcher(str(db_path))
 video_downloader = VideoDownloader(str(download_dir))
+db = TranscriptDatabase(str(db_path))
+rag = TranscriptRAG()
 
 logger.info("Video Grabber Service initialized")
 logger.info(f"Database: {db_path}")
@@ -117,9 +123,6 @@ def vectorize_video_in_background(video_id):
     """Vectorize a single video transcript in background"""
     def do_vectorize():
         try:
-            from transcript_rag import TranscriptRAG
-            rag = TranscriptRAG()
-            
             # Get transcript from DB
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
@@ -144,6 +147,116 @@ def vectorize_video_in_background(video_id):
     
     # Run in background thread
     thread = threading.Thread(target=do_vectorize, daemon=True)
+    thread.start()
+
+
+def generate_shorty_in_background(video_id: str, title: str):
+    """Generate and store Shorty + index it in Chroma in the background."""
+
+    def do_shorty():
+        try:
+            info = db.get_transcript_and_shorty(video_id)
+            if not info or not info.get("text"):
+                _out(f"  [Shorty] ⚠️ No transcript found for {video_id}, skipping Shorty.")
+                return
+
+            transcript_text = info["text"]
+            if info.get("shorty"):
+                _out(f"  [Shorty] Shorty already exists for {video_id}, skipping regeneration.")
+                return
+
+            # Pull video metadata for richer Shorty header
+            video_info = db.get_video_info(video_id) or {}
+            meta = (video_info.get("metadata") or {}) if isinstance(video_info, dict) else {}
+            title_meta = video_info.get("title") if isinstance(video_info, dict) else None
+            channel_meta = video_info.get("channel") if isinstance(video_info, dict) else None
+            upload_date = meta.get("upload_date") if isinstance(meta, dict) else None
+
+            final_title = title_meta or title
+
+            _out(f"  [Shorty] Generating Shorty for {video_id}...")
+            shorty_text = generate_shorty(
+                transcript_text,
+                title=final_title,
+                channel=channel_meta,
+                upload_date=upload_date,
+            )
+            db.save_shorty(video_id, shorty_text)
+            _out(f"  [Shorty] ✅ Shorty saved for {video_id}")
+
+            # Index into Chroma alongside transcript chunks using shared RAG instance
+            rag.index_single_transcript(video_id, transcript_text, shorty=shorty_text)
+            _out(f"  [Shorty] ✅ Shorty indexed for {video_id}")
+        except Exception as e:
+            logger.error(f"❌ Shorty generation error for {video_id}: {e}", exc_info=True)
+
+    thread = threading.Thread(target=do_shorty, daemon=True)
+    thread.start()
+
+
+def generate_synthetic_questions_in_background(video_id: str, title: str):
+    """Generate and store synthetic questions + index them in Chroma in the background."""
+
+    def do_questions():
+        try:
+            info = db.get_transcript_and_shorty(video_id)
+            if not info or not info.get("text"):
+                _out(f"  [SynQ] ⚠️ No transcript found for {video_id}, skipping synthetic questions.")
+                return
+
+            transcript_text = info["text"]
+            _out(f"  [SynQ] Generating synthetic questions for {video_id}...")
+            questions = generate_synthetic_questions(transcript_text, title=title)
+            if not questions:
+                _out(f"  [SynQ] ⚠️ No questions generated for {video_id}")
+                return
+
+            # Store questions in SQLite (embedding_id will be filled after indexing)
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            for q in questions:
+                cursor.execute(
+                    """
+                    INSERT INTO synthetic_questions (video_id, question, embedding_id)
+                    VALUES (?, ?, NULL)
+                    """,
+                    (video_id, q),
+                )
+            conn.commit()
+            conn.close()
+            _out(f"  [SynQ] ✅ Stored {len(questions)} synthetic questions for {video_id}")
+
+            # Index questions into Chroma and backfill embedding IDs using shared RAG instance
+            rag.index_single_transcript(video_id, transcript_text, synthetic_questions=questions)
+            _out(f"  [SynQ] ✅ Indexed synthetic questions for {video_id}")
+        except Exception as e:
+            logger.error(f"❌ Synthetic question generation error for {video_id}: {e}", exc_info=True)
+
+    thread = threading.Thread(target=do_questions, daemon=True)
+    thread.start()
+
+
+def extract_entities_in_background(video_id: str, title: str):
+    """Extract entities and aliases from transcript in the background."""
+
+    def do_entities():
+        try:
+            info = db.get_transcript_and_shorty(video_id)
+            if not info or not info.get("text"):
+                _out(f"  [Entities] ⚠️ No transcript found for {video_id}, skipping entity extraction.")
+                return
+            transcript_text = info["text"]
+            _out(f"  [Entities] Extracting entities for {video_id}...")
+            entities = extract_entities(transcript_text, title=title)
+            if not entities:
+                _out(f"  [Entities] ⚠️ No entities extracted for {video_id}")
+                return
+            count = store_entities(video_id, entities)
+            _out(f"  [Entities] ✅ Stored {count} entities for {video_id}")
+        except Exception as e:
+            logger.error(f"❌ Entity extraction error for {video_id}: {e}", exc_info=True)
+
+    thread = threading.Thread(target=do_entities, daemon=True)
     thread.start()
 
 
@@ -329,6 +442,13 @@ def fetch_transcript_endpoint():
                 categorize_video_in_background(video_id, title, description, tags)
             else:
                 _out("  → Skipping categorization (no description/tags)")
+            # Shorty + synthetic questions generation
+            _out("  → Generating Shorty (background)")
+            generate_shorty_in_background(video_id, title)
+            _out("  → Generating synthetic questions (background)")
+            generate_synthetic_questions_in_background(video_id, title)
+            _out("  → Extracting entities (background)")
+            extract_entities_in_background(video_id, title)
         else:
             _out("  → Skipping vectorization (no transcript)")
         _out(f"\n✅ VIDEO GRABBED: {video_id}")
@@ -394,6 +514,12 @@ def save_pasted_transcript():
         _out(f"\n✅ Pasted transcript saved: {video_id} ({len(transcript_text)} chars saved, timestamps removed)")
         _out("🚀 Vectorizing (background)...")
         vectorize_video_in_background(video_id)
+        _out("  → Generating Shorty (background)")
+        generate_shorty_in_background(video_id, title)
+        _out("  → Generating synthetic questions (background)")
+        generate_synthetic_questions_in_background(video_id, title)
+        _out("  → Extracting entities (background)")
+        extract_entities_in_background(video_id, title)
         _out(f"{'='*60}\n")
         return jsonify({'success': True, 'video_id': video_id, 'message': 'Transcript saved and vectorizing.'})
     except Exception as e:

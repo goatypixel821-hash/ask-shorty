@@ -1,0 +1,11 @@
+data/
+downloads/
+failed_videos.txt
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.pyc
+.env
+transcript_chroma/
+

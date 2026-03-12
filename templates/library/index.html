@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ask Shorty – Library</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+    }
+    .shell {
+      max-width: 1100px;
+      margin: 24px auto 40px;
+      padding: 0 16px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+    p.desc {
+      margin: 0 0 16px;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+    form.filters {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    label {
+      font-size: 12px;
+      color: #d1d5db;
+      display: block;
+      margin-bottom: 2px;
+    }
+    select {
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid #4b5563;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 13px;
+    }
+    button {
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: none;
+      background: #22c55e;
+      color: #022c22;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      text-align: left;
+    }
+    th {
+      font-weight: 600;
+      color: #cbd5f5;
+      background: rgba(15, 23, 42, 0.8);
+      position: sticky;
+      top: 0;
+    }
+    a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid rgba(148, 163, 184, 0.6);
+      margin-right: 4px;
+    }
+    .badge-ok {
+      color: #bbf7d0;
+      border-color: #22c55e;
+    }
+    .badge-miss {
+      color: #fecaca;
+      border-color: #f97373;
+    }
+    .pagination {
+      margin-top: 12px;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #9ca3af;
+    }
+    .pagination a {
+      color: #e5e7eb;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Ask Shorty – Library</h1>
+    <p class="desc">
+      Browse and manage your indexed videos. Click a title to edit metadata, Shorties, questions, and entities.
+    </p>
+
+    <form class="filters" method="get" action="/">
+      <div>
+        <label for="channel">Channel</label>
+        <select name="channel" id="channel">
+          <option value="">All channels</option>
+          {% for ch in channels %}
+            <option value="{{ ch }}" {% if ch == current_channel %}selected{% endif %}>{{ ch }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="status">Status</label>
+        <select name="status" id="status">
+          <option value="all" {% if current_status == "all" %}selected{% endif %}>All</option>
+          <option value="has_shorty" {% if current_status == "has_shorty" %}selected{% endif %}>Has Shorty</option>
+          <option value="missing_shorty" {% if current_status == "missing_shorty" %}selected{% endif %}>Missing Shorty</option>
+        </select>
+      </div>
+      <div>
+        <button type="submit">Apply</button>
+      </div>
+      <div style="flex:1; text-align:right; font-size:12px; color:#9ca3af;">
+        {{ total_count }} videos total
+      </div>
+    </form>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 30%;">Title</th>
+          <th style="width: 18%;">Channel</th>
+          <th style="width: 16%;">Upload date</th>
+          <th style="width: 10%;">Shorty</th>
+          <th style="width: 10%;">Questions</th>
+          <th style="width: 10%;">Entities</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in videos %}
+        <tr>
+          <td>
+            <a href="{{ url_for('video_detail_view', video_id=v['video_id']) }}">
+              {{ v['title'] or "Untitled" }}
+            </a>
+          </td>
+          <td>{{ v['channel'] or "Unknown" }}</td>
+          <td>{{ v['upload_date'] or "" }}</td>
+          <td>
+            {% if v['has_shorty'] %}
+              <span class="badge badge-ok">yes</span>
+            {% else %}
+              <span class="badge badge-miss">no</span>
+            {% endif %}
+          </td>
+          <td>{{ v['question_count'] }}</td>
+          <td>{{ v['entity_count'] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="pagination">
+      <div>
+        Page {{ page }} of {{ total_pages }}
+      </div>
+      <div>
+        {% if page > 1 %}
+          <a href="{{ url_for('library_index', page=page-1, channel=current_channel, status=current_status) }}">&larr; Prev</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a href="{{ url_for('library_index', page=page+1, channel=current_channel, status=current_status) }}">Next &rarr;</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+

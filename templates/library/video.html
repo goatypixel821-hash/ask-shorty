@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ask Shorty – Video {{ video['video_id'] }}</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+    }
+    .shell {
+      max-width: 1100px;
+      margin: 24px auto 40px;
+      padding: 0 16px 40px;
+    }
+    a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+    }
+    .sub {
+      margin: 0 0 18px;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+    .section {
+      margin-bottom: 24px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: radial-gradient(circle at top left, rgba(59,130,246,0.18), transparent 55%),
+                  radial-gradient(circle at bottom right, rgba(34,197,94,0.18), transparent 55%),
+                  #020617;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .section-header h2 {
+      margin: 0;
+      font-size: 15px;
+    }
+    .section-header .arrow {
+      font-size: 13px;
+      color: #9ca3af;
+    }
+    .section-body {
+      margin-top: 10px;
+      display: none; /* collapsed by default */
+    }
+    label {
+      font-size: 12px;
+      color: #d1d5db;
+      display: block;
+      margin-bottom: 2px;
+    }
+    input[type="text"],
+    textarea,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid #4b5563;
+      background: #020617;
+      color: #e5e7eb;
+      font-size: 13px;
+      resize: vertical;
+    }
+    textarea {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      line-height: 1.4;
+    }
+    button {
+      margin-top: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: none;
+      background: #22c55e;
+      color: #022c22;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: #e5e7eb;
+      border: 1px solid rgba(148, 163, 184, 0.7);
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .row > div {
+      flex: 1 1 200px;
+    }
+    ul {
+      margin: 4px 0 0;
+      padding-left: 18px;
+      font-size: 13px;
+    }
+    li {
+      margin-bottom: 4px;
+    }
+    .entity-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .entity-main {
+      flex: 1;
+    }
+    .entity-type {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.7);
+      color: #c4b5fd;
+      margin-left: 6px;
+    }
+    .aliases {
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    .flash {
+      margin-bottom: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      background: rgba(34,197,94,0.15);
+      border: 1px solid rgba(34,197,94,0.6);
+      color: #bbf7d0;
+    }
+    .flash.error {
+      background: rgba(239,68,68,0.1);
+      border-color: rgba(248,113,113,0.9);
+      color: #fecaca;
+    }
+    .transcript-box {
+      max-height: 400px;
+      overflow: auto;
+    }
+    .question-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .question-row input[type="text"] {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <p style="margin:0 0 8px; font-size:13px;">
+      <a href="{{ url_for('library_index') }}">&larr; Back to library</a>
+    </p>
+    <h1>{{ video['title'] or "Untitled video" }}</h1>
+    <p class="sub">
+      Video ID {{ video['video_id'] }} · {{ video['channel'] or "Unknown channel" }} · {{ video['upload_date'] or "Unknown date" }}
+    </p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, msg in messages %}
+          <div class="flash {% if category == 'error' %}error{% endif %}">
+            {{ msg }}
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="section">
+      <div class="section-header" onclick="toggleSection('meta')">
+        <span class="arrow" id="arrow-meta">▶</span>
+        <h2>Metadata</h2>
+      </div>
+      <div class="section-body" id="section-meta">
+        <form method="post" action="{{ url_for('save_metadata', video_id=video['video_id']) }}">
+          <div class="row">
+            <div>
+              <label for="title">Title</label>
+              <input type="text" id="title" name="title" value="{{ video['title'] or '' }}" />
+            </div>
+            <div>
+              <label for="channel">Channel</label>
+              <input type="text" id="channel" name="channel" value="{{ video['channel'] or '' }}" />
+            </div>
+            <div>
+              <label for="upload_date">Upload date</label>
+              <input type="text" id="upload_date" name="upload_date" value="{{ video['upload_date'] or '' }}" placeholder="YYYYMMDD or free text" />
+            </div>
+          </div>
+          <button type="submit">Save metadata</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header" onclick="toggleSection('transcript')">
+        <span class="arrow" id="arrow-transcript">▶</span>
+        <h2>Transcript</h2>
+      </div>
+      <div class="section-body" id="section-transcript">
+        {% if transcript %}
+          <form method="post" action="{{ url_for('save_transcript', video_id=video['video_id']) }}">
+            <input type="hidden" name="transcript_id" value="{{ transcript['id'] }}" />
+            <label for="transcript_text">Transcript text</label>
+            <textarea id="transcript_text" name="transcript_text" class="transcript-box">{{ transcript['text'] or '' }}</textarea>
+            <button type="submit">Save transcript</button>
+          </form>
+        {% else %}
+          <p style="font-size:13px; color:#fca5a5; margin:0;">
+            No transcript record found yet for this video.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header" onclick="toggleSection('shorty')">
+        <span class="arrow" id="arrow-shorty">▶</span>
+        <h2>Shorty</h2>
+      </div>
+      <div class="section-body" id="section-shorty">
+        {% if transcript %}
+          <form method="post" action="{{ url_for('save_shorty_text', video_id=video['video_id']) }}">
+            <input type="hidden" name="transcript_id" value="{{ transcript['id'] }}" />
+            <label for="shorty">Shorty text</label>
+            <textarea id="shorty" name="shorty">{{ transcript['shorty'] or '' }}</textarea>
+            <button type="submit">Save Shorty</button>
+          </form>
+        {% else %}
+          <p style="font-size:13px; color:#fca5a5; margin:0 0 8px;">
+            No transcript/Shorty record found yet for this video.
+          </p>
+        {% endif %}
+        <form method="post" action="{{ url_for('regenerate_shorty', video_id=video['video_id']) }}">
+          <button type="submit" class="secondary">Regenerate Shorty with LLM</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header" onclick="toggleSection('questions')">
+        <span class="arrow" id="arrow-questions">▶</span>
+        <h2>Synthetic questions ({{ questions|length }})</h2>
+      </div>
+      <div class="section-body" id="section-questions">
+        {% if questions %}
+          {% for q in questions %}
+            <div class="question-row">
+              <form method="post" action="{{ url_for('save_question', video_id=video['video_id'], question_id=q['id']) }}" style="flex:1; display:flex; gap:8px; align-items:center;">
+                <input type="text" name="question_text" value="{{ q['question'] }}" />
+                <button type="submit">Save</button>
+              </form>
+              <form method="post" action="{{ url_for('delete_question', video_id=video['video_id'], question_id=q['id']) }}">
+                <button type="submit" class="secondary">Delete</button>
+              </form>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p style="font-size:13px; color:#9ca3af; margin:0;">No synthetic questions stored for this video.</p>
+        {% endif %}
+        <form method="post" action="{{ url_for('regenerate_questions', video_id=video['video_id']) }}" style="margin-top:10px;">
+          <button type="submit" class="secondary">Regenerate questions</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header" onclick="toggleSection('entities')">
+        <span class="arrow" id="arrow-entities">▶</span>
+        <h2>Entities ({{ entities|length }})</h2>
+      </div>
+      <div class="section-body" id="section-entities">
+        <p style="font-size:13px; color:#9ca3af; margin:0 0 8px;">
+          Entities are named people, organizations, products, systems, concepts, and locations extracted from this video. They help connect related videos that mention the same real‑world things.
+        </p>
+        {% if entities %}
+          {% for e in entities %}
+            <div class="entity-row">
+              <form method="post" action="{{ url_for('save_entity', video_id=video['video_id'], entity_id=e['id']) }}" class="entity-main">
+                <div class="row">
+                  <div>
+                    <label>Name</label>
+                    <input type="text" name="name" value="{{ e['name'] }}" />
+                  </div>
+                  <div>
+                    <label>Type</label>
+                    <input type="text" name="type" value="{{ e['type'] }}" />
+                  </div>
+                </div>
+                <div style="margin-top:6px;">
+                  <label>Aliases (comma-separated)</label>
+                  <input type="text" name="aliases" value="{{ e['aliases'] or '' }}" />
+                </div>
+                <button type="submit">Save entity</button>
+              </form>
+              <form method="post" action="{{ url_for('delete_entity', video_id=video['video_id'], entity_id=e['id']) }}">
+                <button type="submit" class="secondary">Delete</button>
+              </form>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p style="font-size:13px; color:#9ca3af; margin:0 0 8px;">No entities stored for this video.</p>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('regenerate_entities', video_id=video['video_id']) }}" style="margin-top:10px;">
+          <button type="submit" class="secondary">Regenerate entities from transcript</button>
+        </form>
+
+        <div style="margin-top:16px;">
+          <h3 style="margin:0 0 6px; font-size:14px;">Add entity manually</h3>
+          <form method="post" action="{{ url_for('add_entity', video_id=video['video_id']) }}">
+            <div class="row">
+              <div>
+                <label for="entity_name">Name</label>
+                <input type="text" id="entity_name" name="name" required />
+              </div>
+              <div>
+                <label for="entity_type">Type</label>
+                <input type="text" id="entity_type" name="type" placeholder="person, organization, concept, software, ..." />
+              </div>
+            </div>
+            <div style="margin-top:8px;">
+              <label for="entity_aliases">Aliases (comma-separated)</label>
+              <input type="text" id="entity_aliases" name="aliases" placeholder="Alt name 1, Alt name 2" />
+            </div>
+            <button type="submit">Add entity</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function toggleSection(key) {
+      var body = document.getElementById("section-" + key);
+      var arrow = document.getElementById("arrow-" + key);
+      if (!body || !arrow) return;
+      var isHidden = body.style.display === "" || body.style.display === "none";
+      body.style.display = isHidden ? "block" : "none";
+      arrow.textContent = isHidden ? "▼" : "▶";
+    }
+  </script>
+</body>
+</html>
+
