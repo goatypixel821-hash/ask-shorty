@@ -14,11 +14,14 @@ Uses Anthropic Claude for:
 """
 
 from typing import List, Dict, Any, Optional
+import logging
 
 from anthropic_client import get_client
 from transcript_rag import TranscriptRAG
 from transcript_database import TranscriptDatabase
 
+
+logger = logging.getLogger(__name__)
 
 ANSWER_MODEL = "claude-sonnet-4-20250514"
 MAX_SHORTIES_IN_CONTEXT = 10
@@ -56,34 +59,59 @@ IMPORTANT RULES:
 
 
 def _call_claude_json_array(system_prompt: str, user_prompt: str) -> List[str]:
-    """Helper that expects Claude to return a JSON array of strings."""
-    import json
-
+    """Helper that expects Claude to return a JSON array of strings via tool use."""
     client = get_client()
+
+    tools = [
+        {
+            "name": "rewrite_queries",
+            "description": "Store alternate phrasings of the user query",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Rewritten query variants",
+                    }
+                },
+                "required": ["queries"],
+            },
+        }
+    ]
+
     resp = client.messages.create(
         model=ANSWER_MODEL,
-        max_tokens=1024,
+        max_tokens=512,
         temperature=0.2,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
+        tools=tools,
+        tool_choice={"type": "tool", "name": "rewrite_queries"},
     )
 
-    text_parts: List[str] = []
+    rewrites: List[str] = []
     for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            text_parts.append(block.text)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            text_parts.append(block.get("text", ""))
-    raw = "\n".join(text_parts).strip()
+        btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+        if btype == "tool_use":
+            name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+            if name != "rewrite_queries":
+                continue
+            tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+            if isinstance(tool_input, dict):
+                items = tool_input.get("queries", [])
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, str):
+                            q = item.strip()
+                            if q:
+                                rewrites.append(q)
+            break
 
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return [str(x).strip() for x in data if isinstance(x, str) and x.strip()]
-    except Exception:
-        pass
-    # Fallback: return original question as single-element list
-    return [user_prompt.strip()]
+    if not rewrites:
+        logger.warning("Query rewriting tool returned no queries; falling back to original.")
+        return [user_prompt.strip()]
+    return rewrites
 
 
 def _call_claude_answer(system_prompt: str, user_prompt: str) -> str:
@@ -172,29 +200,57 @@ class AskShorty:
         useful, returns None to indicate "no metadata filter".
         """
         import sqlite3
-        import json
 
         meta_system = """You are a metadata parser for video search.
 
 Given a natural language question, extract:
 - channel names or creator names, if any
 - an optional date range (date_from, date_to) in ISO format YYYY-MM-DD
-
-Output ONLY JSON of the form:
-{
-  "channels": [<channel_or_creator_names_as_strings>],
-  "date_from": "<YYYY-MM-DD or null>",
-  "date_to": "<YYYY-MM-DD or null>"
-}
 """
 
         user_prompt = f"Question: {question.strip()}"
-        raw = _call_claude_answer(meta_system, user_prompt)
 
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return None
+        client = get_client()
+        tools = [
+            {
+                "name": "parse_metadata",
+                "description": "Parse channel/creator names and optional date range from a question",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "channels": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "date_from": {"type": ["string", "null"]},
+                        "date_to": {"type": ["string", "null"]},
+                    },
+                    "required": ["channels", "date_from", "date_to"],
+                },
+            }
+        ]
+
+        resp = client.messages.create(
+            model=ANSWER_MODEL,
+            max_tokens=256,
+            temperature=0,
+            system=meta_system,
+            messages=[{"role": "user", "content": user_prompt}],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "parse_metadata"},
+        )
+
+        data: Dict[str, Any] = {"channels": [], "date_from": None, "date_to": None}
+        for block in resp.content:
+            btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+            if btype == "tool_use":
+                name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+                if name != "parse_metadata":
+                    continue
+                tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+                if isinstance(tool_input, dict):
+                    data = tool_input
+                break
 
         channels = [c.strip() for c in data.get("channels") or [] if isinstance(c, str) and c.strip()]
         date_from = (data.get("date_from") or "") or None

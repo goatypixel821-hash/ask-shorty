@@ -8,9 +8,12 @@ Uses Anthropic Claude to:
 """
 
 from typing import List, Optional, Dict, Any
+import logging
 
 from anthropic_client import get_client
 
+
+logger = logging.getLogger(__name__)
 
 SHORTY_MODEL = "claude-3-haiku-20240307"
 
@@ -166,35 +169,63 @@ def generate_synthetic_questions(
         transcript=transcript_text.strip(),
     )
 
-    raw = _call_claude(SYNTHETIC_Q_SYSTEM_PROMPT, user_prompt)
+    client = get_client()
 
-    # Try strict JSON parse first
-    import json
+    tools = [
+        {
+            "name": "save_questions",
+            "description": "Save the generated questions",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of questions",
+                    }
+                },
+                "required": ["questions"],
+            },
+        }
+    ]
 
-    questions: List[str] = []
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, str):
-                    q = item.strip()
-                    if q:
-                        questions.append(q)
-    except Exception:
-        # Fallback: split by lines and take question-like lines
-        for line in raw.splitlines():
-            line = line.strip().lstrip("-").strip()
-            if not line:
+    resp = client.messages.create(
+        model=SHORTY_MODEL,
+        max_tokens=1024,
+        temperature=0.2,
+        system=SYNTHETIC_Q_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+        tools=tools,
+        tool_choice={"type": "tool", "name": "save_questions"},
+    )
+
+    raw_questions: List[str] = []
+    for block in resp.content:
+        # Anthropic SDK: block may be an object or a dict
+        btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+        if btype == "tool_use":
+            name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+            if name != "save_questions":
                 continue
-            if not line.endswith("?"):
-                continue
-            questions.append(line)
+            tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+            if isinstance(tool_input, dict):
+                items = tool_input.get("questions", [])
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, str):
+                            q = item.strip()
+                            if q:
+                                raw_questions.append(q)
+            break
 
-    # Truncate or pad to n (padding not necessary; we just cap)
-    if len(questions) > n:
-        questions = questions[:n]
+    if not raw_questions:
+        logger.warning("Structured synthetic questions tool returned no questions.")
 
-    return questions
+    # Truncate to n (no padding needed)
+    if len(raw_questions) > n:
+        raw_questions = raw_questions[:n]
+
+    return raw_questions
 
 
 def generate_shorty_and_questions_for_video(

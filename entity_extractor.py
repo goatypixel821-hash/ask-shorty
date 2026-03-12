@@ -31,7 +31,6 @@ Requirements:
 - Prefer specific, concrete entities that are important to understanding the video.
 - Merge clear aliases into the same entity (e.g., DCS-3000 and Red Hook).
 - Be generous: include people, organizations, products, software, protocols, locations, and important concepts.
-- Output ONLY a JSON array of entity objects, nothing else.
 """
 
 
@@ -47,36 +46,44 @@ Transcript:
 
 def _call_claude_entities(system_prompt: str, user_prompt: str) -> List[Dict[str, Any]]:
     client = get_client()
+
+    tools = [
+        {
+            "name": "save_entities",
+            "description": "Save the extracted entities",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string"},
+                                "aliases": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["name", "type", "aliases"],
+                        },
+                    }
+                },
+                "required": ["entities"],
+            },
+        }
+    ]
+
     resp = client.messages.create(
         model=ENTITY_MODEL,
         max_tokens=2048,
         temperature=0.1,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
+        tools=tools,
+        tool_choice={"type": "tool", "name": "save_entities"},
     )
-
-    parts: List[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text", ""))
-    raw = "\n".join(parts).strip()
-
-    # Claude sometimes wraps JSON in markdown code fences like ```json ... ```.
-    # Strip those fences before attempting to parse.
-    if raw.startswith("```"):
-        # Drop leading ```... line
-        raw = raw.split("\n", 1)[-1]
-        # Drop trailing ``` if present
-        raw = raw.rsplit("```", 1)[0].strip()
-
-    # Claude can also prepend explanatory text before the JSON array.
-    # Locate the first '[' and last ']' and keep only that slice.
-    start = raw.find('[')
-    end = raw.rfind(']')
-    if start != -1 and end != -1 and end > start:
-        raw = raw[start:end + 1]
 
     def _normalize_type(raw_type: str) -> Optional[str]:
         t = raw_type.strip().lower()
@@ -96,35 +103,44 @@ def _call_claude_entities(system_prompt: str, user_prompt: str) -> List[Dict[str
             return "concept"
         return None
 
-    try:
-        data = json.loads(raw)
-        if isinstance(data, list):
-            cleaned: List[Dict[str, Any]] = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip()
-                etype_raw = str(item.get("type", "")).strip()
-                aliases = item.get("aliases") or []
-                if not name or not etype_raw:
-                    continue
-                etype = _normalize_type(etype_raw)
-                if not etype:
-                    continue
-                aliases = [str(a).strip() for a in aliases if isinstance(a, str) and a.strip()]
-                cleaned.append(
-                    {
-                        "name": name,
-                        "type": etype,
-                        "aliases": aliases,
-                    }
-                )
-            if not cleaned:
-                logger.info("Entity extractor returned an empty list after parsing. Raw payload: %s", raw)
-            return cleaned
-    except Exception as e:
-        logger.warning("Failed to parse entity extractor response: %s; raw payload: %s", e, raw)
-    return []
+    entities_payload: List[Dict[str, Any]] = []
+    for block in resp.content:
+        btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+        if btype == "tool_use":
+            name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+            if name != "save_entities":
+                continue
+            tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+            if isinstance(tool_input, dict):
+                items = tool_input.get("entities", [])
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            entities_payload.append(item)
+            break
+
+    cleaned: List[Dict[str, Any]] = []
+    for item in entities_payload:
+        name = str(item.get("name", "")).strip()
+        etype_raw = str(item.get("type", "")).strip()
+        aliases = item.get("aliases") or []
+        if not name or not etype_raw:
+            continue
+        etype = _normalize_type(etype_raw)
+        if not etype:
+            continue
+        aliases = [str(a).strip() for a in aliases if isinstance(a, str) and a.strip()]
+        cleaned.append(
+            {
+                "name": name,
+                "type": etype,
+                "aliases": aliases,
+            }
+        )
+
+    if not cleaned:
+        logger.info("Entity extractor returned an empty list from structured output.")
+    return cleaned
 
 
 def extract_entities(transcript_text: str, title: Optional[str] = None) -> List[Dict[str, Any]]:
