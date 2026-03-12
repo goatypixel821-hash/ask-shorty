@@ -217,6 +217,84 @@ def write_failed_videos(failures: List[Dict[str, Any]]) -> None:
     print(f"Failed videos saved to: {path}")
 
 
+def get_pending_queue_tasks(
+    db: TranscriptDatabase,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch pending processing_queue tasks in FIFO order.
+
+    Returns list of dicts: {id, video_id, task}.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+
+    sql = """
+        SELECT id, video_id, task
+        FROM processing_queue
+        WHERE status = 'pending'
+        ORDER BY created_at ASC, id ASC
+    """
+    params: List[Any] = []
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    tasks: List[Dict[str, Any]] = []
+    for row in rows:
+        tasks.append({"id": row[0], "video_id": row[1], "task": row[2]})
+    return tasks
+
+
+def update_queue_task_status(
+    db: TranscriptDatabase,
+    task_id: int,
+    status: str,
+    error: Optional[str] = None,
+) -> None:
+    """Update a single queue task's status and timestamps."""
+    import sqlite3
+    from datetime import datetime
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+
+    if status == "started":
+        cursor.execute(
+            """
+            UPDATE processing_queue
+            SET status = ?, started_at = ?
+            WHERE id = ?
+            """,
+            (status, now, task_id),
+        )
+    elif status in ("completed", "failed"):
+        cursor.execute(
+            """
+            UPDATE processing_queue
+            SET status = ?, completed_at = ?, error = ?
+            WHERE id = ?
+            """,
+            (status, now, error, task_id),
+        )
+    else:
+        cursor.execute(
+            "UPDATE processing_queue SET status = ? WHERE id = ?",
+            (status, task_id),
+        )
+
+    conn.commit()
+    conn.close()
+
+
 def process_batch(
     db: TranscriptDatabase,
     rag: TranscriptRAG,
@@ -361,6 +439,167 @@ def process_batch(
     print(f"Running total cost: {format_cost(totals['total_cost'])}")
 
 
+def process_queue_tasks(
+    db: TranscriptDatabase,
+    rag: TranscriptRAG,
+    shorty_fn: Callable[..., str],
+    synth_q_fn: Callable[..., List[str]],
+    entity_fn: Callable[..., List[Dict[str, Any]]],
+    limit: Optional[int],
+) -> None:
+    """
+    Process pending tasks from processing_queue in FIFO order.
+
+    Each queue row represents exactly one task: shorty, synthetic_questions, or entities.
+    Transcript chunks are assumed to be already vectorized on grab.
+    """
+    import sqlite3
+
+    processed_count = 0
+
+    while True:
+        remaining = None
+        if limit is not None:
+            remaining = max(limit - processed_count, 0)
+            if remaining == 0:
+                print("\nReached --limit for queue tasks; stopping.")
+                break
+        batch_limit = None
+        if remaining is not None:
+            batch_limit = min(BATCH_SIZE, remaining)
+
+        tasks = get_pending_queue_tasks(db, batch_limit)
+        if not tasks:
+            if processed_count == 0:
+                print("No pending tasks in processing_queue. Nothing to do.")
+            else:
+                print("\nNo more pending tasks in processing_queue.")
+            break
+
+        print(f"\n=== Processing {len(tasks)} queued tasks ===")
+        for task in tasks:
+            task_id = task["id"]
+            video_id = task["video_id"]
+            kind = task["task"]
+
+            print(f"\nTask #{task_id} · video {video_id} · type={kind}")
+            update_queue_task_status(db, task_id, "started")
+
+            try:
+                info = db.get_transcript_and_shorty(video_id)
+                transcript_text = (info or {}).get("text") or db.get_transcript(video_id)
+                if not transcript_text:
+                    msg = "No transcript found; skipping task."
+                    print(f"  ! {msg}")
+                    update_queue_task_status(db, task_id, "failed", msg)
+                    continue
+
+                # Metadata for Shorty header or entity context
+                video_info = db.get_video_info(video_id) or {}
+                meta = (video_info.get("metadata") or {}) if isinstance(video_info, dict) else {}
+                title_meta = video_info.get("title") if isinstance(video_info, dict) else None
+                channel_meta = video_info.get("channel") if isinstance(video_info, dict) else None
+                upload_date = meta.get("upload_date") if isinstance(meta, dict) else None
+
+                final_title = title_meta or (video_info.get("title") if isinstance(video_info, dict) else "Untitled Video")
+                final_channel = channel_meta or (video_info.get("channel") if isinstance(video_info, dict) else "Unknown Channel")
+
+                if kind == "shorty":
+                    print("  → Generating Shorty...")
+                    shorty_text = shorty_fn(
+                        transcript_text,
+                        title=final_title,
+                        channel=final_channel,
+                        upload_date=upload_date,
+                    )
+                    saved = db.save_shorty(video_id, shorty_text)
+                    if not saved:
+                        msg = "Failed to save Shorty."
+                        print(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        continue
+                    print("  ✓ Shorty saved.")
+
+                    # Re-index transcript + Shorty (+ existing questions if any)
+                    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT question FROM synthetic_questions WHERE video_id = ? ORDER BY created_at ASC",
+                        (video_id,),
+                    )
+                    q_rows = cursor.fetchall()
+                    conn.close()
+                    existing_questions = [row[0] for row in q_rows if row and row[0]]
+
+                    print("  → Re-indexing transcript and Shorty in Chroma...")
+                    rag.index_single_transcript(
+                        video_id,
+                        transcript_text,
+                        shorty=shorty_text,
+                        synthetic_questions=existing_questions or None,
+                    )
+                    print("  ✓ Indexing complete.")
+
+                elif kind == "synthetic_questions":
+                    print("  → Generating synthetic questions...")
+                    questions = synth_q_fn(transcript_text, title=final_title)
+                    if not questions:
+                        msg = "No synthetic questions generated."
+                        print(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        continue
+
+                    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+                    cursor = conn.cursor()
+                    for q in questions:
+                        cursor.execute(
+                            """
+                            INSERT INTO synthetic_questions (video_id, question, embedding_id)
+                            VALUES (?, ?, NULL)
+                            """,
+                            (video_id, q),
+                        )
+                    conn.commit()
+                    conn.close()
+                    print(f"  ✓ Stored {len(questions)} synthetic questions.")
+
+                    # Fetch current Shorty (if any) for richer indexing
+                    info_latest = db.get_transcript_and_shorty(video_id)
+                    shorty_text = (info_latest or {}).get("shorty")
+
+                    print("  → Re-indexing transcript + Shorty + questions in Chroma...")
+                    rag.index_single_transcript(
+                        video_id,
+                        transcript_text,
+                        shorty=shorty_text,
+                        synthetic_questions=questions,
+                    )
+                    print("  ✓ Indexing complete.")
+
+                elif kind == "entities":
+                    print("  → Extracting entities...")
+                    entities = entity_fn(transcript_text, title=final_title)
+                    if entities:
+                        count = store_entities(video_id, entities)
+                        print(f"  ✓ Stored {count} entities.")
+                    else:
+                        print("  ! No entities extracted.")
+
+                else:
+                    msg = f"Unknown task type: {kind}"
+                    print(f"  ! {msg}")
+                    update_queue_task_status(db, task_id, "failed", msg)
+                    continue
+
+                update_queue_task_status(db, task_id, "completed", None)
+                processed_count += 1
+
+            except Exception as e:
+                msg = str(e)
+                print(f"  !! Error processing task {task_id} for video {video_id}: {msg}")
+                update_queue_task_status(db, task_id, "failed", msg)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch-process videos for Ask Shorty Shorties.")
     parser.add_argument(
@@ -401,6 +640,12 @@ def main():
         default=None,
         help="Path to transcripts.db (e.g. C:\\Users\\number2\\Desktop\\youtube-history-viewer-copy\\data\\transcripts.db). "
              "If not provided, uses the default DB for this project.",
+    )
+    parser.add_argument(
+        "--queue",
+        action="store_true",
+        default=True,
+        help="Process tasks from processing_queue (default behavior).",
     )
     args = parser.parse_args()
 
@@ -550,6 +795,18 @@ def main():
                         }
                     )
             return entities
+
+    # New default: process from the processing_queue if requested (queue mode).
+    if args.queue:
+        process_queue_tasks(
+            db=db,
+            rag=rag,
+            shorty_fn=shorty_fn,
+            synth_q_fn=synth_q_fn,
+            entity_fn=entity_fn,
+            limit=args.limit,
+        )
+        return
 
     if args.retry_failed:
         videos = get_videos_from_failed(db, args.limit)

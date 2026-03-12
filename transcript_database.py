@@ -130,6 +130,31 @@ class TranscriptDatabase:
                 "ON synthetic_questions(video_id)"
             )
 
+            # Processing queue for deferred LLM work
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS processing_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    task TEXT NOT NULL,          -- shorty, synthetic_questions, entities
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    error TEXT,
+                    FOREIGN KEY (video_id) REFERENCES videos (video_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_processing_queue_status_created "
+                "ON processing_queue(status, created_at)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_processing_queue_video_id "
+                "ON processing_queue(video_id)"
+            )
+
             conn.commit()
             print(f"[OK] Transcript database ready: {self.db_path}")
 
@@ -199,6 +224,36 @@ class TranscriptDatabase:
         except Exception as e:
             print(f"[ERROR] Error saving transcript for {video_id}: {e}")
             return False
+
+    def enqueue_processing_tasks(
+        self,
+        video_id: str,
+        tasks: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Enqueue LLM processing tasks for a video.
+
+        Tasks are strings: 'shorty', 'synthetic_questions', 'entities'.
+        """
+        if tasks is None:
+            tasks = ["shorty", "synthetic_questions", "entities"]
+        if not tasks:
+            return
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                for task in tasks:
+                    cursor.execute(
+                        """
+                        INSERT INTO processing_queue (video_id, task, status)
+                        VALUES (?, ?, 'pending')
+                        """,
+                        (video_id, task),
+                    )
+                conn.commit()
+        except Exception as e:
+            print(f"[ERROR] Error enqueuing processing tasks for {video_id}: {e}")
 
     def save_shorty(self, video_id: str, shorty_text: str) -> bool:
         """Attach a Shorty to the most recent transcript row for a video."""

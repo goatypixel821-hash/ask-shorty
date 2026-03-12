@@ -121,6 +121,8 @@ Anyone should be able to ask questions across their entire video library — pod
 
 ---
 
+This project is licensed under the MIT License (see `LICENSE`).
+
 ## TODO / Roadmap
 
 - Vast.ai / OpenAI-compatible provider support for bulk processing
