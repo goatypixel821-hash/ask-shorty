@@ -105,7 +105,7 @@ SQLite is the canonical store; Chroma is a derived index that can be rebuilt fro
 
 - `transcriptdatabase.py` – SQLite schema, migrations, and enqueue helpers
 - `simpletranscriptfetcher.py` – fetches YouTube transcripts and persists them
-- `videograbber.py` / `startgrabber.py` – bookmarklet‑based ingest service (Flask, default port 5000)
+- `video_grabber.py` / `start_grabber.py` – bookmarklet-based ingest (Flask, default port 5000). Bookmarklet passes video URL, title, and channel; you paste the transcript from YouTube’s “Show transcript” and click Save & Vectorize.
 - `shortygenerator.py` – uses Anthropic to generate Shorty + synthetic questions
 - `entityextractor.py` – extracts entities via Anthropic tool‑use or OpenAI‑compatible JSON prompts
 - `transcriptrag.py` / `transcriptragenhanced.py` – chunking and Chroma integration (`index_single_transcript`, hybrid search)
@@ -146,16 +146,18 @@ set OPENAI_MODEL=gpt-3.5-turbo                 # or another model
 
 `GRABBER_PORT` defaults to `5000` if not set.
 
-### 3. Start the grabber (bookmarklet backend)
+### 3. Start the grabber and add videos (manual transcript)
 
 ```bash
-python startgrabber.py
+python start_grabber.py
 ```
+
+Use **YouTube’s built-in transcript**: on the video page click **···** (more) under the player → **Show transcript** → select all (Ctrl+A) → copy (Ctrl+C). Then open the Ask Shorty grab page (your bookmarklet should point to `http://localhost:5000/grab?url=<video_url>&title=<title>&channel=<channel>`), paste the transcript into the text area, and click **Save & Vectorize**. The service stores the transcript and metadata, vectorizes for search, and queues Shorty / synthetic questions / entities for batch processing.
 
 Endpoints:
 
-- `POST /api/fetch-transcript` – grab transcript from URL
-- `POST /api/save-pasted-transcript` – paste‑mode fallback
+- `GET /grab?url=...&title=...&channel=...` – bookmarklet target; shows video info and a text area to paste the transcript
+- `POST /api/save-transcript` – save pasted transcript and metadata, then vectorize and queue LLM tasks
 
 ### 4. Generate Shorties, synthetic questions, entities
 
@@ -246,9 +248,7 @@ Ask Shorty is designed for **personal, non-commercial use** to index videos you 
 - Intended for research, scholarship, and personal reference
 
 **YouTube Terms of Service:**
-- **Recommended:** Use YouTube Data API v3 for transcript access (requires API key)
-- **Alternative:** Manual transcript copy/paste from YouTube's own transcript feature
-- **Not recommended:** Automated scraping without API authentication
+- Use YouTube’s built-in transcript feature: click **···** under the video → **Show transcript** → copy the text and paste it into Ask Shorty. No automated scraping; the bookmarklet only receives the URL, title, and channel that you provide from the page.
 
 ### Privacy & Data
 

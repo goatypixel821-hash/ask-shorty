@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add to Ask Shorty</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 24px;
+            background: #0a0e14;
+            color: #e6edf3;
+            line-height: 1.5;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 8px; color: #00d4ff; }
+        .video-info {
+            background: #151b23;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            border: 1px solid #2a3544;
+        }
+        .video-info p { margin: 4px 0; color: #8b949e; font-size: 0.95rem; }
+        .video-info strong { color: #e6edf3; }
+        .help {
+            font-size: 0.9rem;
+            color: #8b949e;
+            margin-bottom: 12px;
+        }
+        textarea {
+            width: 100%;
+            min-height: 280px;
+            padding: 12px;
+            font-family: inherit;
+            font-size: 14px;
+            background: #151b23;
+            border: 1px solid #2a3544;
+            border-radius: 8px;
+            color: #e6edf3;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        textarea::placeholder { color: #484f58; }
+        .actions { margin-top: 16px; display: flex; gap: 12px; align-items: center; }
+        button {
+            padding: 10px 20px;
+            font-size: 1rem;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background: #00d4ff;
+            color: #0a0e14;
+        }
+        .btn-primary:hover { background: #33ddff; }
+        .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+        .btn-secondary {
+            background: #2a3544;
+            color: #e6edf3;
+        }
+        .btn-secondary:hover { background: #3d4a5c; }
+        .error { color: #f85149; margin-bottom: 12px; }
+        .success { color: #3fb950; margin-top: 12px; }
+        #result { margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <h1>Add to Ask Shorty</h1>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    {% if video_id %}
+    <div class="video-info">
+        <p><strong>Title:</strong> {{ title }}</p>
+        <p><strong>Channel:</strong> {{ channel }}</p>
+        <p><strong>URL:</strong> <a href="{{ url }}" target="_blank" rel="noopener" style="color:#00d4ff;">{{ url }}</a></p>
+    </div>
+
+    <p class="help">
+        On YouTube: click <strong>···</strong> under the video → <strong>Show transcript</strong> → select all (Ctrl+A) → copy (Ctrl+C). Paste below, then click Save &amp; Vectorize.
+    </p>
+
+    <textarea id="transcript" placeholder="Paste transcript here..."></textarea>
+
+    <div class="actions">
+        <button type="button" class="btn-primary" id="save-btn">Save &amp; Vectorize</button>
+        <button type="button" class="btn-secondary" onclick="window.close()">Cancel</button>
+    </div>
+
+    <div id="result"></div>
+
+    <script>
+        const videoId = {{ video_id | tojson }};
+        const url = {{ url | tojson }};
+        const title = {{ title | tojson }};
+        const channel = {{ channel | tojson }};
+
+        document.getElementById('save-btn').onclick = function() {
+                const text = document.getElementById('transcript').value.trim();
+                if (!text) {
+                    alert('Paste the transcript first.');
+                    return;
+                }
+                const btn = this;
+                btn.disabled = true;
+                btn.textContent = 'Saving...';
+                document.getElementById('result').innerHTML = '';
+
+                fetch('/api/save-transcript', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        transcript_text: text,
+                        url: url,
+                        title: title,
+                        channel: channel
+                    })
+                })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        document.getElementById('result').innerHTML = '<p class="success">' + (d.message || 'Saved.') + '</p>';
+                        setTimeout(function() { window.close(); }, 2000);
+                    } else {
+                        document.getElementById('result').innerHTML = '<p class="error">' + (d.error || 'Save failed') + '</p>';
+                        btn.disabled = false;
+                        btn.textContent = 'Save & Vectorize';
+                    }
+                })
+                .catch(function(err) {
+                    document.getElementById('result').innerHTML = '<p class="error">' + err.message + '</p>';
+                    btn.disabled = false;
+                    btn.textContent = 'Save & Vectorize';
+                });
+            };
+    </script>
+    {% endif %}
+</body>
+</html>
