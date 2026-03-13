@@ -160,6 +160,7 @@
         <div class="answer-box" id="answer-box"></div>
         <div class="meta" id="meta-box"></div>
       </div>
+      <div class="meta" id="status-line" style="margin-top:8px;"></div>
     </div>
   </div>
 
@@ -171,6 +172,7 @@
     const answerCard = document.getElementById("answer-card");
     const answerBox = document.getElementById("answer-box");
     const metaBox = document.getElementById("meta-box");
+    const statusLine = document.getElementById("status-line");
 
     async function doAsk() {
       const q = qEl.value.trim();
@@ -180,6 +182,7 @@
       answerCard.style.display = "none";
       answerBox.textContent = "";
       metaBox.textContent = "";
+      statusLine.textContent = "";
 
       if (!q) {
         errEl.textContent = "Please enter a question.";
@@ -194,27 +197,105 @@
         if (rawVideos) {
           video_ids = rawVideos.split(",").map(v => v.trim()).filter(Boolean);
         }
+        console.log("[ask-ui] Sending /api/ask with question:", q, "video_ids:", video_ids);
         const resp = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ question: q, video_ids })
         });
-        const data = await resp.json();
-        if (!data.success) {
-          throw new Error(data.error || "Unknown error");
+        let data = null;
+        try {
+          data = await resp.json();
+        } catch (jsonErr) {
+          console.error("[ask-ui] Failed to parse /api/ask JSON:", jsonErr);
+          throw new Error("Failed to parse server response from /api/ask");
         }
-        answerBox.textContent = data.answer || "(No answer returned.)";
-        const ctx = data.used_context || [];
-        metaBox.textContent = ctx.length
-          ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`
-          : "No context details available.";
-        answerCard.style.display = "block";
+        console.log("[ask-ui] /api/ask response:", resp.status, data);
+        if (!resp.ok || !data.success) {
+          throw new Error(data.error || "Failed to start Ask job.");
+        }
+
+        const jobId = data.job_id;
+        console.log("[ask-ui] Received jobId:", jobId);
+        statusLine.textContent = `Thinking... job #${jobId}`;
+
+        // Poll for up to 5 minutes (300 seconds)
+        const maxMs = 300000;
+        const intervalMs = 2000;
+
+        async function pollOnce(elapsedMs) {
+          console.log("[ask-ui] pollOnce called, elapsedMs=", elapsedMs, "jobId=", jobId);
+          if (elapsedMs >= maxMs) {
+            statusLine.textContent = "";
+            errEl.textContent = "Timed out waiting for Ask Shorty to finish. Please try again.";
+            errEl.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+            return;
+          }
+
+          try {
+            const r = await fetch(`/api/ask/result/${jobId}`);
+            let body = null;
+            try {
+              body = await r.json();
+            } catch (jsonErr) {
+              console.error("[ask-ui] Failed to parse /api/ask/result JSON:", jsonErr);
+              throw new Error("Failed to parse server response from /api/ask/result");
+            }
+            console.log("[ask-ui] /api/ask/result response:", r.status, body);
+
+            if (!r.ok) {
+              // Treat HTTP error as fatal for this job
+              throw new Error(body.error || "Error fetching result.");
+            }
+
+            if (body.status === "pending" || body.status === "running") {
+              statusLine.textContent = `Thinking... (${body.status})`;
+              console.log("[ask-ui] Job still in progress, scheduling next poll...");
+              setTimeout(() => pollOnce(elapsedMs + intervalMs), intervalMs);
+              return;
+            }
+
+            // Completed or error: stop polling
+            if (body.status === "error" || !body.success) {
+              const msg = body.error || "Process crashed - please retry";
+              statusLine.textContent = "";
+              errEl.textContent = msg;
+              errEl.style.display = "block";
+              askBtn.disabled = false;
+              askBtn.textContent = "Ask Shorty";
+              console.log("[ask-ui] Job completed with error:", msg);
+              return;
+            }
+
+            // status === completed and success === true
+            statusLine.textContent = "Answer ready.";
+            answerBox.textContent = body.answer || "(No answer returned.)";
+            const ctx = body.used_context || [];
+            metaBox.textContent = ctx.length
+              ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`
+              : "No context details available.";
+            answerCard.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+          } catch (err) {
+            console.error("[ask-ui] Polling error:", err);
+            statusLine.textContent = "";
+            errEl.textContent = err.message || String(err);
+            errEl.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+          }
+        }
+
+        // Kick off first poll
+        pollOnce(0);
       } catch (e) {
         errEl.textContent = e.message || String(e);
         errEl.style.display = "block";
       } finally {
-        askBtn.disabled = false;
-        askBtn.textContent = "Ask Shorty";
+        // Button will be re-enabled by polling completion / error handlers.
       }
     }
 

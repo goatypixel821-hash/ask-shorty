@@ -1,0 +1,12 @@
+slide,start_sec,end_sec,duration_sec,notes
+1_Hook,0,10,10,"Title 'RAG over transcripts is broken'; intro line."
+2_ChunkLimits,10,45,35,"Explain chunk-only RAG and 3 failure modes."
+3_AskShortyIdea,45,70,25,"Introduce Shorty + RAG; knowledge bundle diagram."
+4_DataModel_SQLite,70,85,15,"Walk through videos/transcripts/entities/synthetic_questions/processing_queue."
+5_DataModel_Chroma,85,100,15,"Explain Chroma collection and three types."
+6_QueryPipeline_Overview,100,130,30,"Show metadata filter, rewrite, 3x Chroma searches, context."
+7_QueryPipeline_AskUI,130,145,15,"Show Ask UI screenshot and relate to pipeline."
+8_WhyBetter_Comparison,145,175,30,"Compare chunk-only vs Ask Shorty."
+9_Implementation_Stack,175,200,25,"Show stack diagram and quick UI/code glimpses."
+10_Closing_GitHub,200,220,20,"Show GitHub repo + CTA."
+

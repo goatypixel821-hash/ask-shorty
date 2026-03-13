@@ -13,18 +13,26 @@ Uses Anthropic Claude for:
 - Final answer generation from aggregated context
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import logging
+import os
 
 from anthropic_client import get_client
-from transcript_rag import TranscriptRAG
 from transcript_database import TranscriptDatabase
+
+if TYPE_CHECKING:
+    # Only imported for type checking; runtime import is deferred to avoid
+    # initializing Chroma / SentenceTransformer at startup.
+    from transcript_rag import TranscriptRAG  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
 
 ANSWER_MODEL = "claude-sonnet-4-20250514"
 MAX_SHORTIES_IN_CONTEXT = 10
+
+# Disable Chroma/TranscriptRAG usage entirely when this env var is set.
+NO_CHROMA = os.getenv("ASK_SHORTY_NO_CHROMA", "").strip() not in ("", "0", "false", "False")
 
 
 QUERY_REWRITE_SYSTEM = """You are a query rewriting engine.
@@ -136,7 +144,19 @@ def _call_claude_answer(system_prompt: str, user_prompt: str) -> str:
 class AskShorty:
     def __init__(self):
         self.db = TranscriptDatabase()
-        self.rag = TranscriptRAG()
+        # Lazy-init RAG so that any heavy Chroma / SentenceTransformer setup
+        # happens only on first real query, not at import time.
+        self._rag: Optional["TranscriptRAG"] = None
+
+    def _get_rag(self) -> "TranscriptRAG":
+        """Lazily construct the TranscriptRAG instance on first use."""
+        if self._rag is None:
+            # Deferred import so that importing ask_shorty.py does not import
+            # transcript_rag_enhanced or touch Chroma until needed.
+            from transcript_rag import TranscriptRAG as _TranscriptRAG
+
+            self._rag = _TranscriptRAG()
+        return self._rag
 
     def _rewrite_query(self, question: str) -> List[str]:
         user_prompt = QUERY_REWRITE_USER_TEMPLATE.format(question=question.strip())
@@ -164,8 +184,9 @@ class AskShorty:
         if type_filter:
             where["type"] = type_filter
 
+        rag = self._get_rag()
         for q in query_variants:
-            res = self.rag.collection.query(
+            res = rag.collection.query(
                 query_texts=[q],
                 n_results=top_k,
                 where=where if where else None,
@@ -300,6 +321,79 @@ Given a natural language question, extract:
 
         return [r[0] for r in rows]
 
+    def _sqlite_shorty_keyword_search(
+        self,
+        question: str,
+        video_ids: Optional[List[str]] = None,
+        limit: int = MAX_SHORTIES_IN_CONTEXT,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fallback search that bypasses Chroma and uses SQLite + Shorties only.
+
+        - Fetches videos that have a non-empty Shorty.
+        - Does simple keyword matching against LOWER(shorty) and LOWER(title)
+          using LIKE.
+        - Scores by keyword overlap in Python and returns top matches.
+        """
+        import sqlite3
+        import re
+
+        text = question.lower()
+        # Basic tokenization; ignore very short words
+        words = [w for w in re.findall(r"\w+", text) if len(w) >= 3]
+        if not words:
+            return []
+
+        conn = sqlite3.connect(self.db.db_path)  # type: ignore[attr-defined]
+        cursor = conn.cursor()
+
+        base_sql = """
+            SELECT v.video_id, v.title, t.shorty
+            FROM transcripts t
+            JOIN videos v ON v.video_id = t.video_id
+            WHERE t.shorty IS NOT NULL AND trim(t.shorty) != ''
+        """
+        params: List[Any] = []
+
+        if video_ids:
+            placeholders = ",".join("?" for _ in video_ids)
+            base_sql += f" AND v.video_id IN ({placeholders})"
+            params.extend(video_ids)
+
+        # Build LIKE conditions for each keyword, across title and shorty
+        like_clauses = []
+        for w in words:
+            like_clauses.append("LOWER(t.shorty) LIKE ?")
+            params.append(f"%{w}%")
+            like_clauses.append("LOWER(v.title) LIKE ?")
+            params.append(f"%{w}%")
+
+        if like_clauses:
+            base_sql += " AND (" + " OR ".join(like_clauses) + ")"
+
+        cursor.execute(base_sql, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        results: List[Dict[str, Any]] = []
+        for vid, title, shorty in rows:
+            aggregate = (shorty or "") + " " + (title or "")
+            lower = aggregate.lower()
+            score = sum(1 for w in words if w in lower)
+            if score > 0:
+                results.append(
+                    {
+                        "video_id": vid,
+                        "title": title or "",
+                        "shorty": shorty or "",
+                        "score": score,
+                    }
+                )
+
+        # Higher score (more overlaps) is better
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:limit]
+
     def answer_question(
         self,
         question: str,
@@ -315,66 +409,105 @@ Given a natural language question, extract:
           "used_context": [...],
         }
         """
+        print("[ask] Step A: starting answer_question")
         if not question or not question.strip():
             raise ValueError("Question is empty.")
 
         q = question.strip()
 
         # Use metadata parsing to narrow candidate videos (optional)
+        print("[ask] Step B: metadata filter start")
         candidate_videos = self._filter_by_metadata(q, video_ids)
+        print("[ask] Step B: metadata filter done")
+        print("[ask] Step C: query rewrite start")
         rewrites = self._rewrite_query(q)
+        print("[ask] Step C: query rewrite done")
 
-        # Layer 1: transcript chunks
-        chunk_where_type = "chunk"
-        chunk_results = self._search_layer(
-            rewrites,
-            type_filter=chunk_where_type,
-            top_k=top_k_per_layer,
-        )
-
-        # Layer 2: Shorties
-        # For scale:
-        # - If we have candidate_videos from metadata, restrict search to those.
-        # - Otherwise, do a global similarity search over type="shorty".
-        shorty_where: Dict[str, Any] = {"type": "shorty"}
-        if candidate_videos:
-            shorty_where["video_id"] = {"$in": candidate_videos}
-
+        chunk_results: List[Dict[str, Any]] = []
         shorty_results: List[Dict[str, Any]] = []
-        res = self.rag.collection.query(
-            query_texts=rewrites,
-            n_results=MAX_SHORTIES_IN_CONTEXT,
-            where=shorty_where,
-        )
-        # Flatten results across rewrites
-        all_ids = res.get("ids", [])
-        all_docs = res.get("documents", [])
-        all_metas = res.get("metadatas", [])
-        all_scores = res.get("distances", [])
-        for q_idx, docs in enumerate(all_docs):
-            ids_row = all_ids[q_idx]
-            metas_row = all_metas[q_idx]
-            scores_row = all_scores[q_idx]
-            for i, doc in enumerate(docs):
+        synq_results: List[Dict[str, Any]] = []
+
+        # Try Chroma-based RAG search unless disabled
+        used_chroma = False
+        if not NO_CHROMA:
+            try:
+                # Layer 1: transcript chunks
+                print("[ask] Step D: RAG search (chunks/shorties/synqs) start")
+                chunk_where_type = "chunk"
+                chunk_results = self._search_layer(
+                    rewrites,
+                    type_filter=chunk_where_type,
+                    top_k=top_k_per_layer,
+                )
+
+                # Layer 2: Shorties (global search or restricted by metadata)
+                shorty_where: Dict[str, Any] = {"type": "shorty"}
+                if candidate_videos:
+                    shorty_where["video_id"] = {"$in": candidate_videos}
+
+                rag = self._get_rag()
+                res = rag.collection.query(
+                    query_texts=rewrites,
+                    n_results=MAX_SHORTIES_IN_CONTEXT,
+                    where=shorty_where,
+                )
+                # Flatten results across rewrites
+                all_ids = res.get("ids", [])
+                all_docs = res.get("documents", [])
+                all_metas = res.get("metadatas", [])
+                all_scores = res.get("distances", [])
+                for q_idx, docs in enumerate(all_docs):
+                    ids_row = all_ids[q_idx]
+                    metas_row = all_metas[q_idx]
+                    scores_row = all_scores[q_idx]
+                    for i, doc in enumerate(docs):
+                        shorty_results.append(
+                            {
+                                "id": ids_row[i],
+                                "text": doc,
+                                "score": scores_row[i],
+                                "metadata": metas_row[i],
+                                "query": rewrites[q_idx],
+                            }
+                        )
+                # Deduplicate by id and keep best score
+                seen_shorties: Dict[str, Dict[str, Any]] = {}
+                for r in shorty_results:
+                    rid = r["id"]
+                    if rid not in seen_shorties or r["score"] < seen_shorties[rid]["score"]:
+                        seen_shorties[rid] = r
+                shorty_results = sorted(seen_shorties.values(), key=lambda x: x["score"])[:MAX_SHORTIES_IN_CONTEXT]
+
+                # Layer 3: synthetic questions
+                synq_results = self._search_layer(
+                    rewrites,
+                    type_filter="synthetic_question",
+                    top_k=top_k_per_layer,
+                )
+                print("[ask] Step D: RAG search done")
+                used_chroma = True
+            except BaseException as e:
+                # Catch broad exceptions so we can fall back to SQLite keyword search
+                print(f"[ask] Step D: RAG/Chroma search failed, falling back to SQLite-only search: {e!r}")
+
+        if not used_chroma:
+            print("[ask] Step D: using SQLite Shorty keyword fallback (no Chroma)")
+            fallback = self._sqlite_shorty_keyword_search(q, video_ids=video_ids, limit=MAX_SHORTIES_IN_CONTEXT)
+            shorty_results = []
+            for item in fallback:
                 shorty_results.append(
                     {
-                        "id": ids_row[i],
-                        "text": doc,
-                        "score": scores_row[i],
-                        "metadata": metas_row[i],
-                        "query": rewrites[q_idx],
+                        "id": f"{item['video_id']}:shorty",
+                        "text": item["shorty"],
+                        "score": -item["score"],  # lower is better later
+                        "metadata": {
+                            "video_id": item["video_id"],
+                            "title": item["title"],
+                            "type": "shorty",
+                        },
+                        "query": q,
                     }
                 )
-        # Deduplicate by id and keep best score
-        seen_shorties: Dict[str, Dict[str, Any]] = {}
-        for r in shorty_results:
-            rid = r["id"]
-            if rid not in seen_shorties or r["score"] < seen_shorties[rid]["score"]:
-                seen_shorties[rid] = r
-        shorty_results = sorted(seen_shorties.values(), key=lambda x: x["score"])[:MAX_SHORTIES_IN_CONTEXT]
-
-        # Layer 3: synthetic questions
-        synq_results = self._search_layer(rewrites, type_filter="synthetic_question", top_k=top_k_per_layer)
 
         # Optionally filter by video_ids if provided
         def _filter_by_videos(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -422,7 +555,9 @@ Given a natural language question, extract:
 
         merged_context = "\n---\n".join(context_blocks)
         user_prompt = f"User question:\n{q}\n\nContext passages:\n{merged_context}\n\nAnswer the question using ONLY the context above."
+        print("[ask] Step E: calling Anthropic API")
         answer = _call_claude_answer(ANSWER_SYSTEM_PROMPT, user_prompt)
+        print("[ask] Step F: got answer, saving")
 
         return {
             "answer": answer,
