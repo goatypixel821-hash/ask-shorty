@@ -527,25 +527,11 @@ def process_queue_tasks(
                         continue
                     print("  ✓ Shorty saved.")
 
-                    # Re-index transcript + Shorty (+ existing questions if any)
-                    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT question FROM synthetic_questions WHERE video_id = ? ORDER BY created_at ASC",
-                        (video_id,),
-                    )
-                    q_rows = cursor.fetchall()
-                    conn.close()
-                    existing_questions = [row[0] for row in q_rows if row and row[0]]
-
-                    print("  → Re-indexing transcript and Shorty in Chroma...")
-                    rag.index_single_transcript(
-                        video_id,
-                        transcript_text,
-                        shorty=shorty_text,
-                        synthetic_questions=existing_questions or None,
-                    )
-                    print("  ✓ Indexing complete.")
+                    # Re-indexing skipped here (Chroma can call os._exit() and kill the process).
+                    # Run reindex_all.py separately after batch processing; SQLite is the source of truth, Chroma can be rebuilt anytime.
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
 
                 elif kind == "synthetic_questions":
                     print("  → Generating synthetic questions...")
@@ -571,18 +557,11 @@ def process_queue_tasks(
                     conn.close()
                     print(f"  ✓ Stored {len(questions)} synthetic questions.")
 
-                    # Fetch current Shorty (if any) for richer indexing
-                    info_latest = db.get_transcript_and_shorty(video_id)
-                    shorty_text = (info_latest or {}).get("shorty")
-
-                    print("  → Re-indexing transcript + Shorty + questions in Chroma...")
-                    rag.index_single_transcript(
-                        video_id,
-                        transcript_text,
-                        shorty=shorty_text,
-                        synthetic_questions=questions,
-                    )
-                    print("  ✓ Indexing complete.")
+                    # Re-indexing skipped here (Chroma can call os._exit() and kill the process).
+                    # Run reindex_all.py separately after batch processing; SQLite is the source of truth, Chroma can be rebuilt anytime.
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
 
                 elif kind == "entities":
                     print("  → Extracting entities...")
@@ -593,6 +572,10 @@ def process_queue_tasks(
                     else:
                         print("  ! No entities extracted.")
 
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
+
                 else:
                     msg = f"Unknown task type: {kind}"
                     print(f"  ! {msg}")
@@ -600,12 +583,10 @@ def process_queue_tasks(
                     print("[DEBUG] Task #%d status -> failed" % task_id)
                     continue
 
-                update_queue_task_status(db, task_id, "completed", None)
-                print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
-                processed_count += 1
                 if limit is not None and processed_count >= limit:
                     print("[DEBUG] Breaking for loop: reached limit (%d)." % limit)
                     break
+                print("[DEBUG] Loop iteration complete, continuing...")
 
             except Exception as e:
                 msg = str(e)
