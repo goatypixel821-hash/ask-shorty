@@ -240,7 +240,7 @@ def get_pending_queue_tasks(
     params: List[Any] = []
     if limit is not None:
         sql += " LIMIT ?"
-        params.append(limit)
+        params.append(int(limit))  # ensure integer for SQLite
 
     cursor.execute(sql, params)
     rows = cursor.fetchall()
@@ -456,24 +456,28 @@ def process_queue_tasks(
     import sqlite3
 
     processed_count = 0
+    batch_number = 0
 
     while True:
-        remaining = None
+        batch_number += 1
         if limit is not None:
             remaining = max(limit - processed_count, 0)
             if remaining == 0:
-                print("\nReached --limit for queue tasks; stopping.")
+                print("\n[DEBUG] Loop stopping: reached --limit (processed_count=%d, limit=%d)." % (processed_count, limit))
                 break
-        batch_limit = None
-        if remaining is not None:
             batch_limit = min(BATCH_SIZE, remaining)
+        else:
+            batch_limit = BATCH_SIZE  # fetch in batches when no limit
 
         tasks = get_pending_queue_tasks(db, batch_limit)
+        print("\n[DEBUG] Batch #%d: requested batch_limit=%d, fetched %d tasks (processed_count so far=%d, limit=%s)." % (
+            batch_number, batch_limit, len(tasks), processed_count, limit if limit is not None else "None"))
+
         if not tasks:
             if processed_count == 0:
-                print("No pending tasks in processing_queue. Nothing to do.")
+                print("[DEBUG] Loop stopping: no pending tasks in queue.")
             else:
-                print("\nNo more pending tasks in processing_queue.")
+                print("[DEBUG] Loop stopping: no more pending tasks (processed %d this run)." % processed_count)
             break
 
         print(f"\n=== Processing {len(tasks)} queued tasks ===")
@@ -484,6 +488,7 @@ def process_queue_tasks(
 
             print(f"\nTask #{task_id} · video {video_id} · type={kind}")
             update_queue_task_status(db, task_id, "started")
+            print("[DEBUG] Task #%d status -> started" % task_id)
 
             try:
                 info = db.get_transcript_and_shorty(video_id)
@@ -492,6 +497,7 @@ def process_queue_tasks(
                     msg = "No transcript found; skipping task."
                     print(f"  ! {msg}")
                     update_queue_task_status(db, task_id, "failed", msg)
+                    print("[DEBUG] Task #%d status -> failed" % task_id)
                     continue
 
                 # Metadata for Shorty header or entity context
@@ -517,6 +523,7 @@ def process_queue_tasks(
                         msg = "Failed to save Shorty."
                         print(f"  ! {msg}")
                         update_queue_task_status(db, task_id, "failed", msg)
+                        print("[DEBUG] Task #%d status -> failed" % task_id)
                         continue
                     print("  ✓ Shorty saved.")
 
@@ -547,6 +554,7 @@ def process_queue_tasks(
                         msg = "No synthetic questions generated."
                         print(f"  ! {msg}")
                         update_queue_task_status(db, task_id, "failed", msg)
+                        print("[DEBUG] Task #%d status -> failed" % task_id)
                         continue
 
                     conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
@@ -589,15 +597,24 @@ def process_queue_tasks(
                     msg = f"Unknown task type: {kind}"
                     print(f"  ! {msg}")
                     update_queue_task_status(db, task_id, "failed", msg)
+                    print("[DEBUG] Task #%d status -> failed" % task_id)
                     continue
 
                 update_queue_task_status(db, task_id, "completed", None)
+                print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
                 processed_count += 1
+                if limit is not None and processed_count >= limit:
+                    print("[DEBUG] Breaking for loop: reached limit (%d)." % limit)
+                    break
 
             except Exception as e:
                 msg = str(e)
-                print(f"  !! Error processing task {task_id} for video {video_id}: {msg}")
+                print(f"  !! Error processing task {task_id} for video {video_id}: {type(e).__name__}: {msg}")
                 update_queue_task_status(db, task_id, "failed", msg)
+                print("[DEBUG] Task #%d status -> failed (exception); continuing to next task." % task_id)
+            except BaseException:
+                # KeyboardInterrupt, SystemExit, etc. - do not swallow
+                raise
 
 
 def main():

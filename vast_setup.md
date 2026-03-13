@@ -9,25 +9,19 @@ The goal: **cheap, fast bulk generation of Shorties, synthetic questions, and en
 ## 1. Rent a Vast.ai instance
 
 1. Go to `https://vast.ai/` and sign in or create an account.
-2. Click **Rent** to open the instance search page.
+2. Click **Search** / **Rent** to open the instance search page.
 3. Set filters:
-   - **GPU**: look for:
-     - `RTX 3090` (24 GB VRAM), or
-     - `RTX 4090` (24 GB VRAM)  
-     These have enough VRAM to run `Qwen2.5-14B-Instruct` at 4‑bit.
-   - **Template** / **Image**:
-     - Choose a **PyTorch** (or similar ML) template.
-   - **CUDA**:
-     - Prefer **CUDA 12+** images (vLLM runs well there).
-4. Sort by **$/hr** or **reliability**, pick a host with:
-   - GPU: 3090 or 4090
-   - At least **24 GB VRAM**
-   - Reasonable bandwidth and disk space
+   - **Template/Image**: PyTorch image (PyTorch template).
+   - **GPU VRAM**: **≥ 24 GB**.
+   - **Price**: target **≤ $0.40/hr**.
+4. Good options:
+   - `RTX 3090` (24 GB)
+   - `RTX 4090` (24 GB)
+   - `A10` (24 GB)
 5. Click **Rent** on the chosen instance and wait for it to start.
-
-Once the instance is running, open its **Details** page; you will need:
-- The **SSH connection** info
-- The **public IP** and **port mappings** (we will expose port `8000` for vLLM).
+6. Once running, open the instance **Details** page; you will need:
+   - The **SSH connection** info
+   - The **public IP** and **port mappings** (we will expose port `8000` for vLLM).
 
 ---
 
@@ -36,69 +30,69 @@ Once the instance is running, open its **Details** page; you will need:
 SSH into the Vast.ai instance (use the `ssh` command provided in the Vast UI), then run:
 
 ```bash
-pip install vllm
-
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-14B-Instruct \
-  --quantization awq \
-  --max-model-len 8192 \
-  --host 0.0.0.0 \
-  --port 8000
+bash vast_start.sh
 ```
 
-Notes:
-- `Qwen/Qwen2.5-14B-Instruct` is a strong general-purpose instruction model.
-- `--quantization awq` allows it to fit comfortably into **24 GB VRAM**.
-- `--host 0.0.0.0` and `--port 8000` make it reachable from outside the container.
+Wait for vLLM to download and load the model. When it’s ready, you’ll see a log line like:
 
-You can also use the helper script `vast_start.sh` (in this repo) instead of typing commands manually.
+> `Application startup complete`
+
+At that point, the OpenAI-compatible API is live on port `8000` inside the container.
 
 ---
 
 ## 3. Expose the vLLM port on Vast.ai
 
 1. In the Vast.ai dashboard, open your running instance.
-2. Check the **Port mapping** section:
-   - Make sure **container port 8000** is mapped to a **public host port** (e.g. `12345`).
-   - If not, add a mapping from `8000` (container) to some public port.
+2. Check the **Open Ports / Port mapping** section:
+   - Look for a port mapping where the host port maps to itself, e.g. `36396 -> 36396/tcp`.
+   - Use that port number for vLLM’s `--port` (and in your local `--base-url`).
 3. Note the:
    - **Instance IP** (e.g. `123.45.67.89`)
-   - **Host port** mapped to container `8000` (e.g. `12345`)
+   - The chosen **host port** (e.g. `36396`)
 
 You will combine these as:  
 `http://<VAST_IP>:<PORT>/v1`  
-Example: `http://123.45.67.89:12345/v1`
+Example: `http://74.48.78.46:36396/v1`
 
 ---
 
-## 4. Run `batch_processor.py` against vLLM from your local machine
+## 4. Run a quality test batch from your local machine
 
 On your **local Windows machine**, in PowerShell, from the `shorty` project folder:
 
 ```powershell
+$env:OPENAI_API_KEY = "dummy"
 python batch_processor.py `
   --provider openai-compatible `
   --base-url http://<VAST_IP>:<PORT>/v1 `
   --model Qwen/Qwen2.5-14B-Instruct `
-  --db-path 'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db' `
-  --limit 100
+  --db-path 'C:\Users\number2\Desktop\shorty\data\transcripts.db' `
+  --queue `
+  --limit 10
 ```
 
 Replace:
-- `<VAST_IP>` with the instance IP from Vast.ai
-- `<PORT>` with the mapped host port for container port `8000`
+- `<VAST_IP>` with the instance IP from Vast.ai.
+- `<PORT>` with the host port you started vLLM on (for example the self-mapped port from **Open Ports**, like `36396`).
 
 Flags:
 - `--provider openai-compatible` tells `batch_processor.py` to use the OpenAI-style API instead of Anthropic.
 - `--base-url` points to your vLLM server.
 - `--model` must match the model name you passed to vLLM.
-- `--db-path` points to your existing `transcripts.db`.
-- `--limit 100` processes the first 100 videos to validate output before a full run.
+- `--db-path` should point to your **Ask Shorty** `transcripts.db`.
+- `--queue` processes from the `processing_queue` table (Shorty/questions/entities tasks).
+- `--limit 10` processes 10 queued tasks to use as a quality test batch.
 
-The script will:
-- Estimate token + cost,
-- Ask for confirmation,
-- Then generate Shorties, synthetic questions, and entities in batches.
+After the run finishes:
+
+1. Open the **library admin UI** in your browser at `http://127.0.0.1:5002`.
+2. Inspect several of the newly processed videos:
+   - Do the Shorties capture all major topics across the video?
+   - Are important numbers and technical details preserved?
+   - Are synthetic questions meaningful and varied?
+   - Are entities (people, organizations, systems, products) extracted correctly?
+3. Compare these Qwen-based results against existing Haiku-generated Shorties for similar content (e.g., technical talks, investigative videos) to decide if Qwen quality is acceptable for bulk processing.
 
 ---
 

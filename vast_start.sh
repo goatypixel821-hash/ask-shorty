@@ -1,14 +1,15 @@
 #!/bin/bash
+set -e
 
-# Simple helper script to install and start vLLM with Qwen2.5-14B-Instruct
-# on a Vast.ai instance. Paste this into the Vast terminal or run as a script.
+echo '=== Installing vLLM ==='
+pip install vllm -q
 
-pip install vllm huggingface_hub
-
+echo '=== Starting Qwen2.5-14B-Instruct ==='
 python -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen2.5-14B-Instruct \
-  --quantization awq \
+  --quantization awq_marlin \
   --max-model-len 8192 \
   --host 0.0.0.0 \
-  --port 8000
+  --port 36396 \
+  --gpu-memory-utilization 0.90
 
