@@ -233,6 +233,51 @@ Anyone should be able to ask questions across their entire video library — pod
 
 ---
 
+## Legal & Ethical Use
+
+Ask Shorty is designed for **personal, non-commercial use** to index videos you have watched for research and reference purposes.
+
+### Compliance Notes
+
+**Copyright Fair Use:**
+- Transcripts are compressed into transformative summaries (Shorties)
+- Original videos are always cited with links to creators
+- No redistribution of copyrighted content
+- Intended for research, scholarship, and personal reference
+
+**YouTube Terms of Service:**
+- **Recommended:** Use YouTube Data API v3 for transcript access (requires API key)
+- **Alternative:** Manual transcript copy/paste from YouTube's own transcript feature
+- **Not recommended:** Automated scraping without API authentication
+
+### Privacy & Data
+
+- All data stored **locally** on your machine (SQLite + Chroma)
+- No cloud uploads, no third-party sharing
+- You control your data entirely
+
+### Usage Modes
+
+**Personal Use (Current):**
+- Stores transcripts, Shorties, chunks for full RAG capabilities
+- Intended for personal libraries on your own machine
+
+**Future: Compliant Mode (For Sharing):**
+- Will store only transformative data (Shorties, entities, embeddings)
+- Raw transcripts deleted after processing
+- Re-fetches relevant chunks via API when querying
+
+### Disclaimer
+
+This tool is provided for educational and personal research purposes. Users are responsible for complying with YouTube's Terms of Service and applicable copyright laws. Always respect content creators by:
+- Linking back to original videos
+- Not redistributing transcripts or derivatives
+- Using this tool to enhance, not replace, watching original content
+
+If you're a content creator and have concerns about this tool, please open an issue.
+
+---
+
 *Built in Burlington, VT*
 
 This project is licensed under the MIT License (see `LICENSE`).
