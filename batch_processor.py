@@ -42,8 +42,9 @@ from shorty_generator import (
 from entity_extractor import (
     extract_entities,
     store_entities,
-    ENTITY_SYSTEM_PROMPT,
-    ENTITY_USER_TEMPLATE,
+    parse_entities_from_json,
+    ENTITY_JSON_SYSTEM_PROMPT,
+    ENTITY_JSON_USER_TEMPLATE,
 )
 from transcript_rag import TranscriptRAG
 
@@ -753,46 +754,18 @@ def main():
             if not transcript_text or not transcript_text.strip():
                 return []
             safe_title = title or "Untitled Video"
-            user_prompt = ENTITY_USER_TEMPLATE.format(title=safe_title, transcript=transcript_text.strip())
-            raw = _openai_chat(ENTITY_SYSTEM_PROMPT, user_prompt, max_tokens=2048, temperature=0.1)
-
-            # Reuse the same cleanup logic as entity_extractor: strip fences and preamble
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1]
-                raw = raw.rsplit("```", 1)[0].strip()
-            start = raw.find("[")
-            end = raw.rfind("]")
-            if start != -1 and end != -1 and end > start:
-                raw = raw[start : end + 1]
-
-            import json
-
+            user_prompt = ENTITY_JSON_USER_TEMPLATE.format(title=safe_title, transcript=transcript_text.strip())
+            raw = _openai_chat(ENTITY_JSON_SYSTEM_PROMPT, user_prompt, max_tokens=2048, temperature=0.1)
+            # Debug: show raw API response before parsing
+            _preview = raw[:2000] + ("..." if len(raw) > 2000 else "")
+            print("[DEBUG] Entity API raw response (%d chars):\n%s" % (len(raw), _preview))
             try:
-                data = json.loads(raw)
-            except Exception:
+                entities = parse_entities_from_json(raw)
+                print("[DEBUG] parse_entities_from_json returned %d entities" % len(entities))
+                return entities
+            except Exception as e:
+                print("[DEBUG] parse_entities_from_json raised: %s: %s" % (type(e).__name__, e))
                 return []
-
-            entities: List[Dict[str, Any]] = []
-            if isinstance(data, list):
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    name = str(item.get("name", "")).strip()
-                    etype = str(item.get("type", "")).strip()
-                    aliases = item.get("aliases") or []
-                    if not name:
-                        continue
-                    if not isinstance(aliases, list):
-                        aliases = []
-                    aliases = [str(a).strip() for a in aliases if isinstance(a, str) and a.strip()]
-                    entities.append(
-                        {
-                            "name": name,
-                            "type": etype,
-                            "aliases": aliases,
-                        }
-                    )
-            return entities
 
     # New default: process from the processing_queue if requested (queue mode).
     if args.queue:
