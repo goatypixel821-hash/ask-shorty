@@ -9,4 +9,5 @@ __pycache__/
 .env
 transcript_chroma/
 video_grabber_personal.py
+start_grabber_personal.py
 

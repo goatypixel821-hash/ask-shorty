@@ -159,6 +159,21 @@ Endpoints:
 - `GET /grab?url=...&title=...&channel=...` – bookmarklet target; shows video info and a text area to paste the transcript
 - `POST /api/save-transcript` – save pasted transcript and metadata, then vectorize and queue LLM tasks
 
+#### Bookmarklet
+
+Use this bookmarklet on a YouTube watch page to open the Ask Shorty grab form with the current video’s URL, title, and channel filled in. Make sure the grabber is running on port 5000 first.
+
+**Code (paste as the bookmark URL):**
+
+```javascript
+javascript:(function(){var v=window.location.href;if(!v.includes('youtube.com/watch')){alert('Not a YouTube video!');return;}var t=document.title.replace(' - YouTube','');var c='';try{c=document.querySelector('ytd-channel-name a').textContent.trim();}catch(e){try{c=document.querySelector('.ytd-channel-name a').textContent.trim();}catch(e2){}}window.open('http://localhost:5000/grab?url='+encodeURIComponent(v)+'&title='+encodeURIComponent(t)+'&channel='+encodeURIComponent(c),'_blank','width=600,height=600,left=200,top=200');})();
+```
+
+**How to install:**
+
+- **Drag to bookmarks bar:** Create a new bookmark (e.g. “Add to Ask Shorty”), then edit it and paste the code above into the **URL** field. Or copy the one-line code, then drag a link that uses it onto your bookmarks bar (some browsers support this).
+- **Create bookmark manually:** Add a new bookmark (bookmarks bar or bookmarks manager), set the **URL** to the full line above (starting with `javascript:`). Save. When you’re on a YouTube video page, click the bookmark to open the grab form.
+
 ### 4. Generate Shorties, synthetic questions, entities
 
 Backfill existing transcripts:
