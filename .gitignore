@@ -44,6 +44,11 @@ anthropic_key.txt
 video_grabber_personal.py
 start_grabber_personal.py
 
+# ── video / demo / youtube content (kept local only) ────────────────────────
+ask_shorty_demo_video/
+ask_shorty_youtube_video/
+youtube/
+
 # ── OS noise ─────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
