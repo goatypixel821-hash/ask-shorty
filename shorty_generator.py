@@ -95,15 +95,14 @@ Transcript:
 
 
 SYNTHETIC_Q_SYSTEM_PROMPT = """You generate likely user questions about a video.
+Given a transcript, produce 8-10 clear, specific questions a user might ask.
 
-Given a transcript, produce 8–10 clear, specific questions a user might ask.
-
-Requirements:
-- Questions should be factual and answerable from the video.
+Rules:
+- Questions must be factual and answerable from the video.
 - Cover entities, systems, numbers, causal stories, and key claims.
 - Vary angle and level of abstraction.
-- Output ONLY a JSON array of strings, nothing else.
-"""
+- Output ONLY a JSON array of strings.
+- Your response MUST start with [ and end with ]. No other text."""
 
 
 SYNTHETIC_Q_USER_PROMPT_TEMPLATE = """Generate 8–10 likely questions a user might ask about this video.

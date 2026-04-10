@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Observatory</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0c12;
+      --surface:   #0f1117;
+      --card:      #111827;
+      --border:    #1e293b;
+      --border2:   #2d3748;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --dim:       #374151;
+      --blue:      #3b82f6;
+      --green:     #10b981;
+      --amber:     #f59e0b;
+      --red:       #ef4444;
+      --purple:    #8b5cf6;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-wrap: wrap;
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #f1f5f9;
+      white-space: nowrap;
+    }
+    .header-title .orb {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 8px var(--blue);
+      flex-shrink: 0;
+    }
+    .stat-pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+    .pill {
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border2);
+      background: var(--card);
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .pill span { color: #94a3b8; font-weight: 500; }
+    .nav-link {
+      padding: 4px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 12px;
+      background: var(--card);
+    }
+    .nav-link:hover { color: var(--text); border-color: var(--border2); }
+
+    /* ── Layout ── */
+    .main { padding: 20px 24px 100px; max-width: 1400px; margin: 0 auto; }
+    .section-title {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .section { margin-bottom: 32px; }
+
+    /* ── Top row: timeline + scatter ── */
+    .top-row {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr;
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    @media (max-width: 900px) { .top-row { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .panel-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #94a3b8;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    .chart-wrap { position: relative; height: 220px; }
+
+    /* ── Cluster filter bar ── */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .filter-label { font-size: 11px; color: var(--muted); }
+    .filter-chip {
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border2);
+      background: var(--card);
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .filter-chip:hover { border-color: #4b5563; color: var(--text); }
+    .filter-chip.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+    /* ── Hex cluster grid ── */
+    .cluster-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .hex-card {
+      position: relative;
+      width: 168px;
+      cursor: pointer;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 12px 12px;
+      transition: border-color 0.2s, transform 0.15s;
+      overflow: hidden;
+    }
+    .hex-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      border-radius: 12px 12px 0 0;
+    }
+    .hex-card:hover { transform: translateY(-2px); border-color: var(--border2); }
+    .hex-card.selected { border-color: #4b5563; }
+    .hc-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #cbd5e1;
+      line-height: 1.3;
+      margin-bottom: 6px;
+      min-height: 30px;
+    }
+    .hc-count { font-size: 22px; font-weight: 700; color: #f1f5f9; }
+    .hc-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .hc-channels { font-size: 10px; color: #4b5563; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Noise/unclustered card */
+    .noise-card {
+      opacity: 0.6;
+    }
+
+    /* ── Cluster detail drawer ── */
+    .cluster-drawer {
+      display: none;
+      width: 100%;
+      background: #0d111a;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 4px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .cluster-drawer.open { display: block; }
+    .drawer-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .drawer-title { font-size: 14px; font-weight: 600; color: #e2e8f0; }
+    .drawer-close {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .video-list { display: flex; flex-direction: column; gap: 6px; }
+    .video-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--card);
+      font-size: 12px;
+    }
+    .video-row:hover { background: #1a2030; }
+    .vr-date { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+    .vr-title { color: #cbd5e1; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .vr-channel { color: #4b5563; font-size: 10px; white-space: nowrap; }
+
+    /* ── Ask log ── */
+    .ask-log { display: flex; flex-direction: column; gap: 8px; }
+    .ask-row {
+      display: flex;
+      gap: 12px;
+      padding: 10px 14px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .ask-row:hover { border-color: var(--border2); }
+    .ask-ts { color: var(--muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; padding-top: 1px; }
+    .ask-body { flex: 1; min-width: 0; }
+    .ask-q { color: #cbd5e1; font-weight: 500; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ask-a { color: #4b5563; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ask-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; margin-top: 5px; }
+    .ask-status-dot.err { background: var(--red); }
+
+    /* ── Context ask bar ── */
+    .context-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: rgba(10, 12, 18, 0.96);
+      border-top: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      backdrop-filter: blur(8px);
+      z-index: 100;
+    }
+    .ctx-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .ctx-context-badge {
+      font-size: 11px;
+      color: var(--blue);
+      background: rgba(59,130,246,0.1);
+      border: 1px solid rgba(59,130,246,0.25);
+      border-radius: 999px;
+      padding: 2px 8px;
+      white-space: nowrap;
+      display: none;
+    }
+    .ctx-input {
+      flex: 1;
+      background: var(--card);
+      border: 1px solid var(--border2);
+      border-radius: 10px;
+      padding: 8px 14px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    .ctx-input:focus { border-color: var(--blue); }
+    .ctx-btn {
+      padding: 8px 18px;
+      border-radius: 999px;
+      border: none;
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ctx-btn:hover { opacity: 0.9; }
+    .ctx-clear {
+      font-size: 11px;
+      color: var(--muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .ctx-clear:hover { color: var(--text); }
+
+    /* ── Build notice ── */
+    .build-notice {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--muted);
+    }
+    .build-notice code {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-family: monospace;
+      color: var(--amber);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="header">
+  <div class="header-title">
+    <div class="orb"></div>
+    Knowledge Observatory
+  </div>
+  <div class="stat-pills">
+    <div class="pill" id="pill-total">Videos <span id="stat-total">…</span></div>
+    <div class="pill" id="pill-shorties">Deep indexed <span id="stat-shorties">…</span></div>
+    <div class="pill" id="pill-clusters">Clusters <span id="stat-clusters">…</span></div>
+    <div class="pill" id="pill-dates">Range <span id="stat-dates">…</span></div>
+    <div class="pill" id="pill-asks">Asks <span id="stat-asks">…</span></div>
+  </div>
+  <a href="/ask" class="nav-link">Ask Shorty →</a>
+  <a href="/courses" class="nav-link">Courses →</a>
+</header>
+
+<!-- ── Main ── -->
+<div class="main">
+
+  <!-- Top row: timeline + scatter -->
+  <div class="top-row">
+    <div class="panel">
+      <div class="panel-title">Timeline — videos watched by month</div>
+      <div class="chart-wrap">
+        <canvas id="timelineChart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;text-align:center;">
+        Click a bar to filter clusters below to that month
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Knowledge map — 950 deep-indexed videos</div>
+      <div class="chart-wrap">
+        <canvas id="scatterChart"></canvas>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;text-align:center;">
+        Each dot is a Shorty-indexed video · colored by cluster
+      </div>
+    </div>
+  </div>
+
+  <!-- Clusters -->
+  <div class="section">
+    <div class="section-title">Knowledge Clusters</div>
+    <div class="filter-bar">
+      <span class="filter-label">Filter:</span>
+      <span class="filter-chip active" id="filter-all" onclick="setMonthFilter(null)">All time</span>
+      <span id="filter-month-chip" class="filter-chip" style="display:none;"></span>
+    </div>
+    <div id="cluster-grid" class="cluster-grid">
+      <div class="build-notice">
+        <p>Clusters not built yet.</p>
+        <p style="margin-top:8px;">Run: <code>python build_clusters.py</code></p>
+      </div>
+    </div>
+    <div id="cluster-drawer" class="cluster-drawer"></div>
+  </div>
+
+  <!-- Ask log -->
+  <div class="section">
+    <div class="section-title">Ask History</div>
+    <div id="ask-log" class="ask-log">
+      <div style="color:var(--muted);padding:10px;">Loading…</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Context ask bar ── -->
+<div class="context-bar">
+  <span class="ctx-label">Ask:</span>
+  <span class="ctx-context-badge" id="ctx-badge">all videos</span>
+  <input class="ctx-input" id="ctx-input"
+         placeholder="Ask about your knowledge… e.g. 'What do I know about AI safety?'" />
+  <button class="ctx-clear" id="ctx-clear" style="display:none;" onclick="clearContext()">clear context</button>
+  <button class="ctx-btn" onclick="ctxAsk()">Ask Shorty</button>
+</div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────────
+let _clusters    = [];
+let _allVideos   = [];
+let _noiseVideos = [];
+let _colorMap    = {};      // cluster_id (string) -> color
+let _labelMap    = {};      // cluster_id (string) -> label
+let _selectedCluster = null;  // cluster_id or null
+let _selectedMonth   = null;  // "YYYY-MM" or null
+let _ctxVideoIds = null;      // filtered video_id list for ask
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+async function init() {
+  await Promise.all([loadOverview(), loadClusters(), loadTimeline(), loadAskLog()]);
+}
+
+// ─── Overview ────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  try {
+    const d = await fetch("/api/observatory/overview").then(r => r.json());
+    document.getElementById("stat-total").textContent     = d.total_videos?.toLocaleString() || "—";
+    document.getElementById("stat-shorties").textContent  = d.total_shorties?.toLocaleString() || "—";
+    document.getElementById("stat-clusters").textContent  = d.cluster_count || (d.clusters_built ? "—" : "none");
+    const df = (d.date_from || "").substring(0,7);
+    const dt = (d.date_to   || "").substring(0,7);
+    document.getElementById("stat-dates").textContent     = df && dt ? `${df} → ${dt}` : "—";
+    document.getElementById("stat-asks").textContent      = d.ask_count || 0;
+  } catch(e) { console.warn("overview failed", e); }
+}
+
+// ─── Clusters ────────────────────────────────────────────────────────────────
+async function loadClusters() {
+  try {
+    const d = await fetch("/api/observatory/clusters").then(r => r.json());
+    if (d.error) return; // not built yet — leave default notice
+
+    _clusters    = d.clusters || [];
+    _noiseVideos = d.noise_videos || [];
+
+    _clusters.forEach(c => {
+      _colorMap[String(c.id)]  = c.color;
+      _labelMap[String(c.id)]  = c.label;
+    });
+    _colorMap["-1"] = "#374151";
+    _colorMap["-2"] = "#1e293b";
+
+    renderClusterGrid(_clusters, _selectedMonth);
+    renderScatter(_clusters, _noiseVideos);
+  } catch(e) { console.warn("clusters failed", e); }
+}
+
+// ─── Timeline ────────────────────────────────────────────────────────────────
+let _timelineData = null;
+
+async function loadTimeline() {
+  try {
+    const d = await fetch("/api/observatory/timeline").then(r => r.json());
+    _timelineData = d;
+    // Store all_videos for context filtering
+    _allVideos = [];  // populated after clusters loaded
+
+    renderTimeline(d);
+  } catch(e) { console.warn("timeline failed", e); }
+}
+
+function renderTimeline(d) {
+  const ctx = document.getElementById("timelineChart").getContext("2d");
+
+  // Build stacked dataset per cluster
+  const clusterCids = Object.keys(d.by_cluster || {})
+    .filter(k => k !== "-1" && k !== "-2")
+    .sort((a,b) => Number(a)-Number(b));
+
+  const datasets = [];
+
+  // Unclustered (gray) at bottom
+  if (d.by_cluster?.["-2"]) {
+    datasets.push({
+      label:           "Unclustered",
+      data:            d.by_cluster["-2"],
+      backgroundColor: "#1e293b",
+      borderWidth:     0,
+    });
+  }
+  // Noise (dark gray)
+  if (d.by_cluster?.["-1"]) {
+    datasets.push({
+      label:           "Noise",
+      data:            d.by_cluster["-1"],
+      backgroundColor: "#374151",
+      borderWidth:     0,
+    });
+  }
+  // Each cluster
+  clusterCids.forEach(cid => {
+    const color = _colorMap[cid] || "#3b82f6";
+    datasets.push({
+      label:           _labelMap[cid] || `Cluster ${cid}`,
+      data:            d.by_cluster[cid],
+      backgroundColor: color + "cc",
+      borderWidth:     0,
+    });
+  });
+
+  new Chart(ctx, {
+    type: "bar",
+    data: { labels: d.months, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: items => items[0].label,
+            label: item => ` ${item.dataset.label}: ${item.raw}`,
+          }
+        }
+      },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color: "#4b5563", font: { size: 10 }, maxRotation: 45 },
+          grid:  { color: "#111827" },
+        },
+        y: {
+          stacked: true,
+          ticks: { color: "#4b5563", font: { size: 10 } },
+          grid:  { color: "#1e293b" },
+        }
+      },
+      onClick: (evt, items, chart) => {
+        if (!items.length) return;
+        const month = d.months[items[0].index];
+        setMonthFilter(month);
+      }
+    }
+  });
+}
+
+// ─── Scatter plot ─────────────────────────────────────────────────────────────
+function renderScatter(clusters, noiseVideos) {
+  const ctx = document.getElementById("scatterChart").getContext("2d");
+
+  const datasets = clusters.map(c => ({
+    label:           c.label,
+    data:            c.videos.map(v => ({ x: v.x, y: v.y, title: v.title, channel: v.channel })),
+    backgroundColor: c.color + "99",
+    pointRadius:     4,
+    pointHoverRadius:6,
+  }));
+
+  // Noise
+  if (noiseVideos.length) {
+    datasets.push({
+      label:           "Unclustered",
+      data:            noiseVideos.map(v => ({ x: v.x, y: v.y, title: v.title, channel: v.channel })),
+      backgroundColor: "#37415166",
+      pointRadius:     3,
+      pointHoverRadius:5,
+    });
+  }
+
+  new Chart(ctx, {
+    type: "scatter",
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: item => `${item.raw.title || "?"} · ${item.raw.channel || ""}`,
+          }
+        }
+      },
+      scales: {
+        x: { display: false },
+        y: { display: false },
+      }
+    }
+  });
+}
+
+// ─── Cluster grid ─────────────────────────────────────────────────────────────
+function renderClusterGrid(clusters, monthFilter) {
+  const grid = document.getElementById("cluster-grid");
+  if (!clusters.length) {
+    grid.innerHTML = '<div class="build-notice"><p>No clusters found. Run: <code>python build_clusters.py</code></p></div>';
+    return;
+  }
+
+  // Filter videos by month if needed
+  function countInMonth(cluster) {
+    if (!monthFilter) return cluster.count;
+    return cluster.videos.filter(v => (v.watch_date || "").startsWith(monthFilter)).length;
+  }
+
+  // Sort by count in current filter
+  const sorted = [...clusters].sort((a, b) => countInMonth(b) - countInMonth(a));
+
+  grid.innerHTML = "";
+
+  sorted.forEach(c => {
+    const count = countInMonth(c);
+    if (monthFilter && count === 0) return; // hide empty clusters when filtering
+
+    const card = document.createElement("div");
+    card.className = "hex-card" + (_selectedCluster === c.id ? " selected" : "");
+    card.style.setProperty("--accent", c.color);
+    card.innerHTML = `
+      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:${c.color};border-radius:12px 12px 0 0;opacity:0.8;"></div>
+      <div class="hc-label">${esc(c.label)}</div>
+      <div class="hc-count" style="color:${c.color}">${count}</div>
+      <div class="hc-sub">video${count !== 1 ? "s" : ""}${monthFilter ? " this month" : ""}</div>
+      <div class="hc-channels">${c.top_channels.slice(0,3).map(esc).join(" · ")}</div>
+    `;
+    card.addEventListener("click", () => toggleClusterDrawer(c));
+    grid.appendChild(card);
+  });
+
+  // Noise card
+  const noiseCount = monthFilter
+    ? _noiseVideos.filter(v => (v.watch_date || "").startsWith(monthFilter)).length
+    : _noiseVideos.length;
+
+  if (noiseCount > 0) {
+    const nc = document.createElement("div");
+    nc.className = "hex-card noise-card";
+    nc.innerHTML = `
+      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:#374151;border-radius:12px 12px 0 0;"></div>
+      <div class="hc-label" style="color:var(--muted)">Unclustered</div>
+      <div class="hc-count" style="color:var(--muted)">${noiseCount}</div>
+      <div class="hc-sub">videos</div>
+    `;
+    nc.addEventListener("click", () => toggleNoiseDrawer(monthFilter));
+    grid.appendChild(nc);
+  }
+}
+
+// ─── Cluster drawer ───────────────────────────────────────────────────────────
+function toggleClusterDrawer(cluster) {
+  const drawer = document.getElementById("cluster-drawer");
+
+  if (_selectedCluster === cluster.id) {
+    // Close
+    _selectedCluster = null;
+    drawer.classList.remove("open");
+    drawer.innerHTML = "";
+    renderClusterGrid(_clusters, _selectedMonth);
+    clearContext();
+    return;
+  }
+
+  _selectedCluster = cluster.id;
+  renderClusterGrid(_clusters, _selectedMonth);
+
+  let videos = cluster.videos;
+  if (_selectedMonth) {
+    videos = videos.filter(v => (v.watch_date || "").startsWith(_selectedMonth));
+  }
+
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <div style="width:10px;height:10px;border-radius:50%;background:${cluster.color};box-shadow:0 0 6px ${cluster.color};"></div>
+      <div class="drawer-title">${esc(cluster.label)}</div>
+      <div style="font-size:11px;color:var(--muted);margin-left:8px;">${videos.length} videos${_selectedMonth ? " in " + _selectedMonth : ""}</div>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+    <div class="video-list">
+      ${videos.map(v => `
+        <div class="video-row">
+          <span class="vr-date">${(v.watch_date||"").substring(0,10)}</span>
+          <span class="vr-title" title="${esc(v.title)}">${esc(v.title)}</span>
+          <span class="vr-channel">${esc(v.channel)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+  drawer.classList.add("open");
+
+  // Set context for the ask bar
+  const ids = videos.map(v => v.video_id);
+  setContext(`${cluster.label}${_selectedMonth ? " · " + _selectedMonth : ""}`, ids);
+}
+
+function toggleNoiseDrawer(monthFilter) {
+  const drawer = document.getElementById("cluster-drawer");
+  let videos = _noiseVideos;
+  if (monthFilter) videos = videos.filter(v => (v.watch_date || "").startsWith(monthFilter));
+
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <div class="drawer-title">Unclustered videos</div>
+      <div style="font-size:11px;color:var(--muted);margin-left:8px;">${videos.length} videos</div>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+    <div class="video-list">
+      ${videos.map(v => `
+        <div class="video-row">
+          <span class="vr-date">${(v.watch_date||"").substring(0,10)}</span>
+          <span class="vr-title" title="${esc(v.title)}">${esc(v.title)}</span>
+          <span class="vr-channel">${esc(v.channel)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+  drawer.classList.add("open");
+}
+
+function closeDrawer() {
+  _selectedCluster = null;
+  document.getElementById("cluster-drawer").classList.remove("open");
+  document.getElementById("cluster-drawer").innerHTML = "";
+  renderClusterGrid(_clusters, _selectedMonth);
+  clearContext();
+}
+
+// ─── Month filter ─────────────────────────────────────────────────────────────
+function setMonthFilter(month) {
+  _selectedMonth = month;
+  _selectedCluster = null;
+  document.getElementById("cluster-drawer").classList.remove("open");
+  document.getElementById("cluster-drawer").innerHTML = "";
+
+  const allChip   = document.getElementById("filter-all");
+  const monthChip = document.getElementById("filter-month-chip");
+
+  if (month) {
+    allChip.classList.remove("active");
+    monthChip.textContent = month + " ✕";
+    monthChip.style.display = "inline-block";
+    monthChip.classList.add("active");
+    monthChip.onclick = () => setMonthFilter(null);
+  } else {
+    allChip.classList.add("active");
+    monthChip.style.display = "none";
+    clearContext();
+  }
+
+  renderClusterGrid(_clusters, month);
+}
+
+// ─── Ask log ─────────────────────────────────────────────────────────────────
+async function loadAskLog() {
+  const el = document.getElementById("ask-log");
+  try {
+    const d = await fetch("/api/observatory/ask-log").then(r => r.json());
+    const asks = d.asks || [];
+    if (!asks.length) {
+      el.innerHTML = '<div style="color:var(--muted);padding:10px;">No asks yet. Try asking something on the Ask page.</div>';
+      return;
+    }
+    el.innerHTML = asks.map(a => `
+      <div class="ask-row" onclick="reaskQuestion(${JSON.stringify(esc(a.question))})">
+        <div class="ask-status-dot ${a.status !== 'completed' ? 'err' : ''}"></div>
+        <div class="ask-ts">${fmtDate(a.created_at)}</div>
+        <div class="ask-body">
+          <div class="ask-q">${esc(a.question)}</div>
+          <div class="ask-a">${esc(a.answer_snippet)}</div>
+        </div>
+      </div>
+    `).join("");
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--muted);padding:10px;">Could not load ask history.</div>';
+  }
+}
+
+function reaskQuestion(question) {
+  document.getElementById("ctx-input").value = question;
+  document.getElementById("ctx-input").focus();
+}
+
+// ─── Context ask bar ──────────────────────────────────────────────────────────
+function setContext(label, videoIds) {
+  _ctxVideoIds = videoIds;
+  const badge = document.getElementById("ctx-badge");
+  badge.textContent = label;
+  badge.style.display = "inline-block";
+  document.getElementById("ctx-clear").style.display = "inline";
+  document.getElementById("ctx-input").placeholder = `Ask about "${label}"…`;
+}
+
+function clearContext() {
+  _ctxVideoIds = null;
+  document.getElementById("ctx-badge").style.display = "none";
+  document.getElementById("ctx-clear").style.display = "none";
+  document.getElementById("ctx-input").placeholder = "Ask about your knowledge… e.g. 'What do I know about AI safety?'";
+}
+
+async function ctxAsk() {
+  const q = document.getElementById("ctx-input").value.trim();
+  if (!q) return;
+  // Navigate to /ask with the question pre-filled via query string
+  const params = new URLSearchParams({ q });
+  if (_ctxVideoIds && _ctxVideoIds.length) {
+    params.set("video_ids", _ctxVideoIds.join(","));
+  }
+  window.open(`/ask?${params}`, "_blank");
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function esc(s) {
+  if (s == null) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function fmtDate(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (isNaN(d)) return ts.substring(0,16);
+  return d.toLocaleDateString("en-US", { month:"short", day:"numeric" })
+       + " " + d.toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit" });
+}
+
+// Allow Enter key in context bar
+document.getElementById("ctx-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") ctxAsk();
+});
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

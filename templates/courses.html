@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Courses</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0c12; --surface: #0f1117; --card: #111827; --border: #1e293b;
+      --text: #e2e8f0; --muted: #64748b; --blue: #3b82f6; --green: #10b981;
+      --amber: #f59e0b; --red: #ef4444;
+    }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+    .header {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+      padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface);
+    }
+    .header-title { font-size: 18px; font-weight: 600; color: #f1f5f9; display: flex; align-items: center; gap: 10px; }
+    .header-title .orb { width: 10px; height: 10px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+    .nav { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+    .nav a {
+      padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); color: var(--muted);
+      text-decoration: none; font-size: 12px; background: var(--card);
+    }
+    .nav a:hover { color: var(--text); border-color: #2d3748; }
+    .nav a.active { color: var(--text); border-color: var(--amber); }
+    .stat-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+    .pill { padding: 3px 10px; border-radius: 999px; border: 1px solid #2d3748; background: var(--card); font-size: 12px; color: var(--muted); }
+    .pill span { color: #94a3b8; font-weight: 500; }
+    .main { padding: 20px 24px 80px; max-width: 1400px; margin: 0 auto; }
+    .banner {
+      padding: 12px 16px; border-radius: 10px; margin-bottom: 20px; font-size: 14px;
+      background: #1e1b4b; border: 1px solid #4338ca; color: #c7d2fe;
+    }
+    .banner.error { background: #450a0a; border-color: #991b1b; color: #fecaca; }
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 20px;
+    }
+    .filter-btn {
+      padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--card);
+      color: var(--muted); font-size: 12px; cursor: pointer;
+    }
+    .filter-btn:hover, .filter-btn.on { color: var(--text); border-color: var(--blue); }
+    .search {
+      flex: 1; min-width: 200px; max-width: 360px; padding: 8px 12px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
+    }
+    .btn {
+      padding: 8px 16px; border-radius: 10px; border: none; font-size: 13px; font-weight: 500;
+      cursor: pointer; background: var(--blue); color: #fff;
+    }
+    .btn.secondary { background: #374151; color: #e5e7eb; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+      display: flex; flex-direction: column; min-height: 220px;
+    }
+    .card-stripe { height: 5px; width: 100%; }
+    .card-body { padding: 16px 18px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+    .card h2 { font-size: 16px; font-weight: 600; line-height: 1.35; color: #f8fafc; }
+    .card .desc { font-size: 13px; color: var(--muted); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.8em; }
+    .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+    .mini { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #0f172a; color: #94a3b8; border: 1px solid var(--border); }
+    .mini.level-Beginner { border-color: var(--green); color: #6ee7b7; }
+    .mini.level-Intermediate { border-color: var(--amber); color: #fcd34d; }
+    .mini.level-Advanced { border-color: var(--red); color: #fca5a5; }
+    .chans { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .chan { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #1e293b; color: #94a3b8; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card a.view {
+      margin-top: auto; align-self: flex-start; padding: 8px 14px; border-radius: 8px;
+      background: transparent; border: 1px solid var(--border); color: var(--text); text-decoration: none; font-size: 13px;
+    }
+    .card a.view:hover { border-color: var(--blue); color: var(--blue); }
+    .card.hidden { display: none; }
+    .log {
+      margin-top: 16px; padding: 12px; border-radius: 10px; background: #0f172a; border: 1px solid var(--border);
+      font-family: ui-monospace, monospace; font-size: 11px; color: #94a3b8; max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+    }
+    .empty { text-align: center; padding: 48px 20px; color: var(--muted); }
+    .empty p { margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="header-title"><span class="orb"></span> Knowledge Courses</div>
+    <div class="stat-pills">
+      <div class="pill"><span>{{ (catalog.total_courses or 0) if catalog else 0 }}</span> courses</div>
+      <div class="pill"><span>{{ (catalog.total_lessons or 0) if catalog else 0 }}</span> lessons</div>
+      <div class="pill"><span>{{ (catalog.total_hours or 0) if catalog else 0 }}</span> h est.</div>
+    </div>
+    <nav class="nav">
+      <a href="/ask">Ask</a>
+      <a href="/knowledge">Observatory</a>
+      <a href="/courses" class="active">Courses</a>
+    </nav>
+  </header>
+
+  <main class="main">
+    {% if error %}
+    <div class="banner error">{{ error }}</div>
+    {% endif %}
+
+    <div class="toolbar">
+      <button type="button" class="filter-btn on" data-filter="all">All</button>
+      <button type="button" class="filter-btn" data-filter="Beginner">Beginner</button>
+      <button type="button" class="filter-btn" data-filter="Intermediate">Intermediate</button>
+      <button type="button" class="filter-btn" data-filter="Advanced">Advanced</button>
+      <input type="search" class="search" id="topicSearch" placeholder="Search title or description…" />
+      <button type="button" class="btn secondary" id="btnRefresh">Refresh stats</button>
+      <button type="button" class="btn" id="btnGenMissing">Generate missing</button>
+      <button type="button" class="btn" id="btnGenAll">Generate all courses</button>
+    </div>
+    <div class="log" id="genLog" style="display:none;"></div>
+
+    <div class="grid" id="courseGrid">
+      {% set courses = catalog.get('courses', []) if catalog else [] %}
+      {% if courses|length == 0 %}
+      <div class="empty" style="grid-column: 1 / -1;">
+        <p>No courses on disk yet. Click <strong>Generate all courses</strong> (long + uses API) or run locally:</p>
+        <code style="color:#94a3b8;">python build_courses.py --clusters 2</code>
+      </div>
+      {% endif %}
+      {% for c in courses %}
+      <article class="card"
+        data-level="{{ c.level or '' }}"
+        data-text="{{ (c.title or '')|lower }} {{ (c.description or '')|lower }}">
+        <div class="card-stripe" style="background:{{ c.color or '#3b82f6' }}"></div>
+        <div class="card-body">
+          <h2>{{ c.title }}</h2>
+          <p class="desc">{{ c.description or '—' }}</p>
+          <div class="pills">
+            <span class="mini">{{ c.module_count or 0 }} modules</span>
+            <span class="mini">{{ c.lesson_count or 0 }} lessons</span>
+            <span class="mini">{{ c.estimated_hours or 0 }} h</span>
+            <span class="mini level-{{ c.level or '' }}">{{ c.level or 'Level' }}</span>
+          </div>
+          {% if c.top_channels %}
+          <div class="chans">
+            {% for ch in c.top_channels[:3] %}
+            <span class="chan" title="{{ ch }}">{{ ch }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <a class="view" href="/courses/{{ c.id }}">View course</a>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      const grid = document.getElementById('courseGrid');
+      const search = document.getElementById('topicSearch');
+      const logEl = document.getElementById('genLog');
+      let levelFilter = 'all';
+
+      function applyFilters() {
+        const q = (search.value || '').trim().toLowerCase();
+        document.querySelectorAll('.card').forEach(function (card) {
+          const lv = card.getAttribute('data-level') || '';
+          const text = card.getAttribute('data-text') || '';
+          const okLevel = levelFilter === 'all' || lv === levelFilter;
+          const okQ = !q || text.indexOf(q) >= 0;
+          card.classList.toggle('hidden', !(okLevel && okQ));
+        });
+      }
+
+      document.querySelectorAll('.filter-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          document.querySelectorAll('.filter-btn').forEach(function (b) { b.classList.remove('on'); });
+          btn.classList.add('on');
+          levelFilter = btn.getAttribute('data-filter') || 'all';
+          applyFilters();
+        });
+      });
+      search.addEventListener('input', applyFilters);
+
+      function appendLog(line) {
+        logEl.style.display = 'block';
+        logEl.textContent += line + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      async function postGenerate(body) {
+        logEl.textContent = '';
+        const r = await fetch('/api/courses/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json();
+        if (!j.success) {
+          appendLog('Error: ' + (j.error || r.status));
+          return;
+        }
+        const es = new EventSource('/api/courses/stream/' + j.job_id);
+        es.onmessage = function (ev) {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === 'progress') appendLog((msg.step || '') + ': ' + (msg.message || ''));
+            else if (msg.type === 'error') appendLog('ERROR: ' + (msg.message || ''));
+            else if (msg.type === 'complete') { appendLog('Done. Reloading…'); es.close(); location.reload(); }
+            else if (msg.type === 'stream_end') es.close();
+          } catch (e) {}
+        };
+        es.onerror = function () { es.close(); };
+      }
+
+      document.getElementById('btnGenAll').addEventListener('click', function () {
+        if (!confirm('Generate ALL courses? This uses many Claude calls (cached after first run).')) return;
+        postGenerate({ all: true });
+      });
+      document.getElementById('btnGenMissing').addEventListener('click', function () {
+        postGenerate({ all: true, missing_only: true });
+      });
+      document.getElementById('btnRefresh').addEventListener('click', function () { location.reload(); });
+    })();
+  </script>
+</body>
+</html>

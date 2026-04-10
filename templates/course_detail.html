@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ course.title }} — Course</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0c12; --surface: #0f1117; --card: #111827; --border: #1e293b;
+      --text: #e2e8f0; --muted: #64748b; --blue: #3b82f6; --green: #10b981; --amber: #f59e0b;
+    }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+    a { color: var(--blue); }
+    .topbar {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface);
+    }
+    .topbar a.back { color: var(--muted); text-decoration: none; font-size: 13px; }
+    .topbar a.back:hover { color: var(--text); }
+    .downloads { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+    .downloads a {
+      font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+      text-decoration: none; color: var(--muted);
+    }
+    .downloads a:hover { color: var(--text); border-color: #475569; }
+    .layout { display: flex; align-items: flex-start; max-width: 1200px; margin: 0 auto; min-height: calc(100vh - 52px); }
+    #toc {
+      position: sticky; top: 0; width: 240px; max-height: 100vh; overflow: auto;
+      padding: 20px 14px; border-right: 1px solid var(--border); flex-shrink: 0; background: #0c0e14;
+    }
+    #toc h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 10px; }
+    #toc a { display: block; font-size: 12px; color: var(--muted); text-decoration: none; padding: 4px 0; }
+    #toc a:hover { color: var(--text); }
+    #toc a.sub { padding-left: 10px; font-size: 11px; }
+    #content { flex: 1; padding: 24px 28px 80px; min-width: 0; }
+    .hero {
+      margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid var(--border);
+    }
+    .hero h1 { font-size: 26px; margin-bottom: 10px; color: #f8fafc; }
+    .hero .desc { color: var(--muted); max-width: 720px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); color: #94a3b8; }
+    .pre { margin-top: 12px; font-size: 13px; color: var(--muted); }
+    .pre ul { margin-left: 18px; margin-top: 6px; }
+    .module { margin-bottom: 32px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--card); }
+    .module-h {
+      width: 100%; text-align: left; padding: 14px 18px; background: #0f172a;
+      border: none; color: var(--text); font-size: 16px; font-weight: 600; cursor: pointer;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .module-h:hover { background: #1e293b; }
+    .module-body { padding: 0 18px 18px; display: none; }
+    .module.open > .module-body { display: block; }
+    .objectives { margin: 14px 0; }
+    .objectives h4 { font-size: 12px; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+    .objectives ul { margin-left: 18px; color: #cbd5e1; }
+    .intro { color: #94a3b8; font-size: 14px; margin-bottom: 16px; white-space: pre-wrap; }
+    .lesson {
+      border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: #0f1117;
+    }
+    .lesson h4 { font-size: 15px; margin-bottom: 8px; }
+    .lesson .meta-row { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .concepts { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
+    details.notes { margin: 10px 0; }
+    details.notes summary { cursor: pointer; color: var(--blue); font-size: 13px; }
+    .notes-pre { white-space: pre-wrap; font-size: 13px; color: #cbd5e1; margin-top: 8px; }
+    .dq { margin-top: 10px; font-size: 13px; }
+    .dq ol { margin-left: 18px; margin-top: 6px; }
+    .quiz-block { margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--border); }
+    .quiz-block h4 { margin-bottom: 12px; font-size: 14px; }
+    .q { margin-bottom: 14px; padding: 10px; border-radius: 8px; background: #0a0c12; border: 1px solid var(--border); }
+    .q .qtext { margin-bottom: 8px; }
+    .q label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; margin-top: 6px; }
+    .q details { margin-top: 8px; font-size: 12px; }
+    .q .answer { color: #a7f3d0; margin-top: 6px; }
+    .score-line { font-size: 13px; color: var(--amber); margin-top: 10px; }
+    .summary-box { margin-top: 16px; padding: 12px; border-radius: 10px; background: #0f172a; font-size: 13px; color: #94a3b8; }
+    #gsearch { width: 100%; max-width: 400px; margin-bottom: 12px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+    dl.gloss dt { font-weight: 600; margin-top: 12px; color: #e2e8f0; }
+    dl.gloss dd { margin: 4px 0 0 12px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 800px) {
+      .layout { flex-direction: column; }
+      #toc { position: relative; width: 100%; max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+    }
+    @media print {
+      .topbar, #toc, .downloads { display: none; }
+      .layout { display: block; }
+      #content { padding: 12px; }
+      .module-body { display: block !important; }
+      details { display: block !important; }
+      details summary { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="back" href="/courses">← Course catalog</a>
+    <div class="downloads">
+      <a href="/api/courses/{{ course.id }}/download?format=markdown">Markdown</a>
+      <a href="/api/courses/{{ course.id }}/download?format=html">HTML</a>
+      <a href="/api/courses/{{ course.id }}/download?format=json">JSON</a>
+      <a href="#" id="btnPrint">Print / Save PDF</a>
+    </div>
+  </div>
+
+  <div class="layout">
+    <nav id="toc">
+      <h2>Contents</h2>
+      {% for mod in course.modules %}
+      <a href="#m{{ mod.number }}">Module {{ mod.number }}: {{ mod.title }}</a>
+      {% for les in mod.lessons %}
+      <a class="sub" href="#l{{ mod.number }}-{{ les.number }}">{{ mod.number }}.{{ les.number }} {{ les.title }}</a>
+      {% endfor %}
+      {% endfor %}
+      <a href="#final">Final exam</a>
+      <a href="#glossary">Glossary</a>
+    </nav>
+
+    <article id="content">
+      <header class="hero">
+        <h1>{{ course.title }}</h1>
+        <p class="desc">{{ course.description or '' }}</p>
+        <div class="meta">
+          <span class="badge">{{ course.level or '' }}</span>
+          <span class="badge">{{ course.estimated_hours or 0 }} h estimated</span>
+          {% if course.cluster_ids %}
+          <span class="badge">Clusters: {{ course.cluster_ids | join(', ') }}</span>
+          {% endif %}
+        </div>
+        {% if course.prerequisites %}
+        <div class="pre"><strong>Prerequisites</strong><ul>
+          {% for p in course.prerequisites %}<li>{{ p }}</li>{% endfor %}
+        </ul></div>
+        {% endif %}
+      </header>
+
+      {% for mod in course.modules %}
+      <section class="module" id="m{{ mod.number }}">
+        <button type="button" class="module-h" aria-expanded="false">
+          <span>Module {{ mod.number }}: {{ mod.title }}</span>
+          <span class="chev">▼</span>
+        </button>
+        <div class="module-body">
+          {% if mod.learning_objectives %}
+          <div class="objectives">
+            <h4>Learning objectives</h4>
+            <ul>{% for o in mod.learning_objectives %}<li>{{ o }}</li>{% endfor %}</ul>
+          </div>
+          {% endif %}
+          {% if mod.introduction %}
+          <div class="intro">{{ mod.introduction }}</div>
+          {% endif %}
+
+          {% for les in mod.lessons %}
+          <div class="lesson" id="l{{ mod.number }}-{{ les.number }}">
+            <h4>Lesson {{ mod.number }}.{{ les.number }}: {{ les.title }}</h4>
+            <div class="meta-row">
+              <a href="{{ les.video_url }}" target="_blank" rel="noopener">{{ les.channel }}</a>
+              · Watched: {{ les.watch_date or '—' }} · {{ les.duration_estimate or '' }}
+            </div>
+            {% if les.key_concepts %}
+            <div class="concepts"><strong>Key concepts:</strong> {{ les.key_concepts | join(', ') }}</div>
+            {% endif %}
+            <details class="notes"><summary>Lesson notes</summary>
+              <div class="notes-pre">{{ les.lesson_notes or '' }}</div>
+            </details>
+            {% if les.discussion_questions %}
+            <div class="dq"><strong>Discussion</strong><ol>
+              {% for q in les.discussion_questions %}<li>{{ q }}</li>{% endfor %}
+            </ol></div>
+            {% endif %}
+          </div>
+          {% endfor %}
+
+          <div class="quiz-block" data-quiz="mod-{{ mod.number }}">
+            <h4>Module quiz (self-check)</h4>
+            {% for q in mod.quiz %}
+            <div class="q" data-idx="{{ loop.index0 }}">
+              <div class="qtext"><strong>{{ loop.index }}.</strong> {{ q.question }}</div>
+              <label><input type="checkbox" class="got-it" /> I answered this correctly (self-honor)</label>
+              <details><summary>Show suggested answer</summary>
+                <div class="answer">{{ q.answer }}</div>
+              </details>
+            </div>
+            {% endfor %}
+            <div class="score-line score-mod-{{ mod.number }}">Score: 0 / {{ mod.quiz | length }}</div>
+          </div>
+
+          {% if mod.summary %}
+          <div class="summary-box"><strong>Module summary</strong><br/>{{ mod.summary }}</div>
+          {% endif %}
+        </div>
+      </section>
+      {% endfor %}
+
+      <section class="module open" id="final">
+        <button type="button" class="module-h" aria-expanded="true">Final exam <span class="chev">▼</span></button>
+        <div class="module-body">
+          <div class="quiz-block" data-quiz="final">
+            {% for q in course.final_exam %}
+            <div class="q" data-idx="{{ loop.index0 }}">
+              <div class="qtext"><strong>{{ loop.index }}.</strong> {{ q.question }}</div>
+              <label><input type="checkbox" class="got-it" /> I answered this correctly</label>
+              <details><summary>Show suggested answer</summary>
+                <div class="answer">{{ q.answer }}</div>
+              </details>
+            </div>
+            {% endfor %}
+            <div class="score-line score-final">Score: 0 / {{ course.final_exam | length }}</div>
+          </div>
+        </div>
+      </section>
+
+      <section style="margin-top:40px" id="glossary">
+        <h2 style="margin-bottom:12px;font-size:18px;">Glossary</h2>
+        <input type="search" id="gsearch" placeholder="Filter terms…" />
+        <dl class="gloss" id="glossary-list">
+          {% for g in course.glossary | sort(attribute='term') %}
+          <dt>{{ g.term }}</dt>
+          <dd>{{ g.definition }}</dd>
+          {% endfor %}
+        </dl>
+      </section>
+    </article>
+  </div>
+
+  <script>
+    (function () {
+      document.querySelectorAll('.module-h').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var sec = btn.closest('.module');
+          var open = sec.classList.toggle('open');
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+      });
+
+      function wireQuiz(container, scoreSel) {
+        var scoreEl = container.querySelector(scoreSel);
+        if (!scoreEl) return;
+        var checks = container.querySelectorAll('.got-it');
+        function upd() {
+          var n = 0;
+          checks.forEach(function (c) { if (c.checked) n++; });
+          var tot = checks.length;
+          scoreEl.textContent = 'Score: ' + n + ' / ' + tot + ' (self-reported)';
+        }
+        checks.forEach(function (c) { c.addEventListener('change', upd); });
+        upd();
+      }
+      document.querySelectorAll('.quiz-block[data-quiz^="mod-"]').forEach(function (el) {
+        var id = el.getAttribute('data-quiz').replace('mod-', '');
+        wireQuiz(el, '.score-mod-' + id);
+      });
+      var fin = document.querySelector('.quiz-block[data-quiz="final"]');
+      if (fin) wireQuiz(fin, '.score-final');
+
+      document.getElementById('gsearch').addEventListener('input', function () {
+        var q = this.value.toLowerCase();
+        document.querySelectorAll('#glossary-list dt').forEach(function (dt) {
+          var ok = !q || dt.textContent.toLowerCase().indexOf(q) >= 0;
+          dt.style.display = ok ? '' : 'none';
+          var dd = dt.nextElementSibling;
+          if (dd) dd.style.display = ok ? '' : 'none';
+        });
+      });
+
+      document.getElementById('btnPrint').addEventListener('click', function (e) {
+        e.preventDefault();
+        window.print();
+      });
+    })();
+  </script>
+</body>
+</html>

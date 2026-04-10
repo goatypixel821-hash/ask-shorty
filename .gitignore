@@ -1,13 +1,50 @@
+# ── database & runtime data ──────────────────────────────────────────────────
 data/
+# Course builder cache/catalog/courses JSON live under data/ (ignored above).
+# Repo-root exports from export_course.py:
+courses/
 downloads/
 failed_videos.txt
 *.db
 *.db-shm
 *.db-wal
+
+# ── Chroma vector store ───────────────────────────────────────────────────────
+transcript_chroma/
+transcript_chroma_new/
+
+# ── eval data (corpus content, labels, queries) ────────────────────────────────
+# NEVER commit these — they contain transcript content and local labels
+eval_data/
+eval_results/
+
+# legacy flat eval files (may contain transcript excerpts)
+eval_queries.json
+eval_queries_draft.json
+eval_queries*.json
+eval_queries*.jsonl
+
+# ── Python artefacts ──────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── env / secrets ─────────────────────────────────────────────────────────────
 .env
-transcript_chroma/
+*.env
+secrets.json
+anthropic_key.txt
+
+# ── personal / machine-specific grabber scripts ───────────────────────────────
 video_grabber_personal.py
 start_grabber_personal.py
 
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

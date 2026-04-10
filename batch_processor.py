@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import os
 import time
 from typing import List, Dict, Any, Optional, Tuple, Callable
 
@@ -50,6 +51,33 @@ from transcript_rag import TranscriptRAG
 
 
 BATCH_SIZE = 10
+CONNECTION_RETRY_ATTEMPTS = 3
+CONNECTION_RETRY_WAIT_SEC = 30
+
+# Exceptions that trigger retry (connection/network) instead of immediate fail
+try:
+    from anthropic import APIConnectionError as _APIConnectionError
+    _RETRIABLE_EXCEPTIONS = (_APIConnectionError, ConnectionError, TimeoutError, OSError)
+except ImportError:
+    _RETRIABLE_EXCEPTIONS = (ConnectionError, TimeoutError, OSError)
+
+
+def _call_with_connection_retries(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call fn; on connection-related errors retry up to CONNECTION_RETRY_ATTEMPTS with wait. Re-raise after exhaustion."""
+    last: Optional[BaseException] = None
+    for attempt in range(CONNECTION_RETRY_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except _RETRIABLE_EXCEPTIONS as e:
+            last = e
+            if attempt < CONNECTION_RETRY_ATTEMPTS - 1:
+                print(f"  [retry {attempt + 1}/{CONNECTION_RETRY_ATTEMPTS}] waiting {CONNECTION_RETRY_WAIT_SEC}s...")
+                time.sleep(CONNECTION_RETRY_WAIT_SEC)
+            else:
+                raise
+    if last is not None:
+        raise last
+    raise RuntimeError("unreachable")
 
 # Haiku pricing (USD per 1M tokens)
 INPUT_PRICE_PER_M = 1.00
@@ -221,9 +249,11 @@ def write_failed_videos(failures: List[Dict[str, Any]]) -> None:
 def get_pending_queue_tasks(
     db: TranscriptDatabase,
     limit: Optional[int] = None,
+    video_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Fetch pending processing_queue tasks in FIFO order.
+    If video_id is set, only tasks for that video are returned.
 
     Returns list of dicts: {id, video_id, task}.
     """
@@ -235,10 +265,13 @@ def get_pending_queue_tasks(
     sql = """
         SELECT id, video_id, task
         FROM processing_queue
-        WHERE status = 'pending'
-        ORDER BY created_at ASC, id ASC
+        WHERE status = ?
     """
-    params: List[Any] = []
+    params: List[Any] = ["pending"]
+    if video_id is not None:
+        sql += " AND video_id = ?"
+        params.append(video_id)
+    sql += " ORDER BY created_at ASC, id ASC"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(int(limit))  # ensure integer for SQLite
@@ -246,6 +279,10 @@ def get_pending_queue_tasks(
     cursor.execute(sql, params)
     rows = cursor.fetchall()
     conn.close()
+
+    # Debug: print query and row count so we can see why we might get 0 tasks
+    print("[DEBUG] get_pending_queue_tasks SQL: %s" % (sql.strip().replace("\n", " ")))
+    print("[DEBUG] get_pending_queue_tasks params: %s -> %d rows" % (params, len(rows)))
 
     tasks: List[Dict[str, Any]] = []
     for row in rows:
@@ -272,19 +309,30 @@ def update_queue_task_status(
         cursor.execute(
             """
             UPDATE processing_queue
-            SET status = ?, started_at = ?
+            SET status = ?, started_at = ?, attempts = COALESCE(attempts, 0) + 1
             WHERE id = ?
             """,
             (status, now, task_id),
         )
-    elif status in ("completed", "failed"):
+    elif status == "completed":
         cursor.execute(
             """
             UPDATE processing_queue
-            SET status = ?, completed_at = ?, error = ?
+            SET status = 'completed', completed_at = ?, error = ?
             WHERE id = ?
             """,
-            (status, now, error, task_id),
+            (now, error, task_id),
+        )
+    elif status == "failed":
+        # After 5+ attempts, mark permanently_failed so auto-reset never retries it
+        cursor.execute(
+            """
+            UPDATE processing_queue
+            SET status = CASE WHEN COALESCE(attempts, 0) >= 6 THEN 'permanently_failed' ELSE 'failed' END,
+                completed_at = ?, error = ?
+            WHERE id = ?
+            """,
+            (now, error, task_id),
         )
     else:
         cursor.execute(
@@ -295,6 +343,24 @@ def update_queue_task_status(
     conn.commit()
     conn.close()
 
+
+def reset_failed_queue_tasks(db: TranscriptDatabase) -> int:
+    """Reset only status='failed' to 'pending'. Never touch completed or permanently_failed."""
+    import sqlite3
+    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    # Explicit: only rows with status exactly 'failed' are reset (never completed/started/permanently_failed)
+    cursor.execute(
+        "UPDATE processing_queue SET status = 'pending' WHERE status = ?",
+        ("failed",),
+    )
+    n = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+# Chroma reindexing of Shorties disabled on Windows due to os._exit() crash - SQLite search used instead.
 
 def process_batch(
     db: TranscriptDatabase,
@@ -446,12 +512,14 @@ def process_queue_tasks(
     shorty_fn: Callable[..., str],
     synth_q_fn: Callable[..., List[str]],
     entity_fn: Callable[..., List[Dict[str, Any]]],
+    triples_fn: Callable[[str, str], List[Dict[str, Any]]],
     limit: Optional[int],
+    video_id: Optional[str] = None,
 ) -> None:
     """
     Process pending tasks from processing_queue in FIFO order.
 
-    Each queue row represents exactly one task: shorty, synthetic_questions, or entities.
+    Each queue row represents exactly one task: shorty, synthetic_questions, entities, or triples.
     Transcript chunks are assumed to be already vectorized on grab.
     """
     import sqlite3
@@ -470,11 +538,15 @@ def process_queue_tasks(
         else:
             batch_limit = BATCH_SIZE  # fetch in batches when no limit
 
-        tasks = get_pending_queue_tasks(db, batch_limit)
+        tasks = get_pending_queue_tasks(db, batch_limit, video_id=video_id)
         print("\n[DEBUG] Batch #%d: requested batch_limit=%d, fetched %d tasks (processed_count so far=%d, limit=%s)." % (
             batch_number, batch_limit, len(tasks), processed_count, limit if limit is not None else "None"))
 
         if not tasks:
+            n_failed = reset_failed_queue_tasks(db)
+            if n_failed > 0:
+                print("\nResetting %d failed task(s) and continuing..." % n_failed)
+                continue
             if processed_count == 0:
                 print("[DEBUG] Loop stopping: no pending tasks in queue.")
             else:
@@ -484,16 +556,16 @@ def process_queue_tasks(
         print(f"\n=== Processing {len(tasks)} queued tasks ===")
         for task in tasks:
             task_id = task["id"]
-            video_id = task["video_id"]
+            current_video_id = task["video_id"]  # do not overwrite video_id param (used as filter for next fetch)
             kind = task["task"]
 
-            print(f"\nTask #{task_id} · video {video_id} · type={kind}")
+            print(f"\nTask #{task_id} · video {current_video_id} · type={kind}")
             update_queue_task_status(db, task_id, "started")
             print("[DEBUG] Task #%d status -> started" % task_id)
 
             try:
-                info = db.get_transcript_and_shorty(video_id)
-                transcript_text = (info or {}).get("text") or db.get_transcript(video_id)
+                info = db.get_transcript_and_shorty(current_video_id)
+                transcript_text = (info or {}).get("text") or db.get_transcript(current_video_id)
                 if not transcript_text:
                     msg = "No transcript found; skipping task."
                     print(f"  ! {msg}")
@@ -502,7 +574,7 @@ def process_queue_tasks(
                     continue
 
                 # Metadata for Shorty header or entity context
-                video_info = db.get_video_info(video_id) or {}
+                video_info = db.get_video_info(current_video_id) or {}
                 meta = (video_info.get("metadata") or {}) if isinstance(video_info, dict) else {}
                 title_meta = video_info.get("title") if isinstance(video_info, dict) else None
                 channel_meta = video_info.get("channel") if isinstance(video_info, dict) else None
@@ -513,13 +585,14 @@ def process_queue_tasks(
 
                 if kind == "shorty":
                     print("  → Generating Shorty...")
-                    shorty_text = shorty_fn(
+                    shorty_text = _call_with_connection_retries(
+                        shorty_fn,
                         transcript_text,
                         title=final_title,
                         channel=final_channel,
                         upload_date=upload_date,
                     )
-                    saved = db.save_shorty(video_id, shorty_text)
+                    saved = db.save_shorty(current_video_id, shorty_text)
                     if not saved:
                         msg = "Failed to save Shorty."
                         print(f"  ! {msg}")
@@ -527,16 +600,13 @@ def process_queue_tasks(
                         print("[DEBUG] Task #%d status -> failed" % task_id)
                         continue
                     print("  ✓ Shorty saved.")
-
-                    # Re-indexing skipped here (Chroma can call os._exit() and kill the process).
-                    # Run reindex_all.py separately after batch processing; SQLite is the source of truth, Chroma can be rebuilt anytime.
                     update_queue_task_status(db, task_id, "completed", None)
                     print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
                     processed_count += 1
 
                 elif kind == "synthetic_questions":
                     print("  → Generating synthetic questions...")
-                    questions = synth_q_fn(transcript_text, title=final_title)
+                    questions = _call_with_connection_retries(synth_q_fn, transcript_text, title=final_title)
                     if not questions:
                         msg = "No synthetic questions generated."
                         print(f"  ! {msg}")
@@ -552,27 +622,77 @@ def process_queue_tasks(
                             INSERT INTO synthetic_questions (video_id, question, embedding_id)
                             VALUES (?, ?, NULL)
                             """,
-                            (video_id, q),
+                            (current_video_id, q),
                         )
                     conn.commit()
                     conn.close()
                     print(f"  ✓ Stored {len(questions)} synthetic questions.")
-
-                    # Re-indexing skipped here (Chroma can call os._exit() and kill the process).
-                    # Run reindex_all.py separately after batch processing; SQLite is the source of truth, Chroma can be rebuilt anytime.
                     update_queue_task_status(db, task_id, "completed", None)
                     print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
                     processed_count += 1
 
                 elif kind == "entities":
                     print("  → Extracting entities...")
-                    entities = entity_fn(transcript_text, title=final_title)
+                    entities = _call_with_connection_retries(entity_fn, transcript_text, title=final_title)
                     if entities:
-                        count = store_entities(video_id, entities)
+                        count = store_entities(current_video_id, entities)
                         print(f"  ✓ Stored {count} entities.")
                     else:
                         print("  ! No entities extracted.")
 
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
+
+                elif kind == "triples":
+                    shorty_text = (info or {}).get("shorty") or ""
+                    if not shorty_text.strip():
+                        msg = "No Shorty; cannot extract triples."
+                        print(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        print("[DEBUG] Task #%d status -> failed" % task_id)
+                        continue
+                    print("  → Extracting triples...")
+                    triples = _call_with_connection_retries(triples_fn, shorty_text, final_title)
+                    n_stored = db.replace_facts_for_video(current_video_id, triples)
+                    print(f"  ✓ Stored {n_stored} triples.")
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
+
+                elif kind == "segments":
+                    print("  → HSC segment summaries...")
+                    from hsc.segment_extractor import extract_segments
+
+                    segs = _call_with_connection_retries(extract_segments, transcript_text, None)
+                    rows = [
+                        {
+                            "start_time": s.get("start_time"),
+                            "end_time": s.get("end_time"),
+                            "summary": (s.get("summary") or "").strip(),
+                        }
+                        for s in segs
+                        if (s.get("summary") or "").strip()
+                    ]
+                    n_seg = db.replace_segments_for_video(current_video_id, rows)
+                    print(f"  ✓ Stored {n_seg} segments.")
+                    update_queue_task_status(db, task_id, "completed", None)
+                    print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
+                    processed_count += 1
+
+                elif kind == "events":
+                    print("  → HSC event extraction...")
+                    from hsc.event_extractor import extract_events
+
+                    shorty_text = (info or {}).get("shorty") or ""
+                    evs = _call_with_connection_retries(
+                        extract_events,
+                        transcript_text,
+                        final_title,
+                        shorty_text,
+                    )
+                    n_ev = db.replace_events_for_video(current_video_id, evs)
+                    print(f"  ✓ Stored {n_ev} events.")
                     update_queue_task_status(db, task_id, "completed", None)
                     print("[DEBUG] Task #%d status -> completed (processed_count now=%d)" % (task_id, processed_count + 1))
                     processed_count += 1
@@ -591,7 +711,7 @@ def process_queue_tasks(
 
             except Exception as e:
                 msg = str(e)
-                print(f"  !! Error processing task {task_id} for video {video_id}: {type(e).__name__}: {msg}")
+                print(f"  !! Error processing task {task_id} for video {current_video_id}: {type(e).__name__}: {msg}")
                 update_queue_task_status(db, task_id, "failed", msg)
                 print("[DEBUG] Task #%d status -> failed (exception); continuing to next task." % task_id)
             except BaseException:
@@ -646,6 +766,12 @@ def main():
         default=True,
         help="Process tasks from processing_queue (default behavior).",
     )
+    parser.add_argument(
+        "--video-id",
+        type=str,
+        default=None,
+        help="Only process queue tasks for this video_id (e.g. dQw4w9WgXcQ).",
+    )
     args = parser.parse_args()
 
     # Allow pointing at an external transcripts.db (e.g. youtube-history-viewer-copy)
@@ -662,6 +788,7 @@ def main():
         shorty_fn = generate_shorty
         synth_q_fn = generate_synthetic_questions
         entity_fn = extract_entities
+        from triple_extractor import extract_triples as triples_fn
     else:
         # OpenAI-compatible client setup
         import os
@@ -767,6 +894,18 @@ def main():
                 print("[DEBUG] parse_entities_from_json raised: %s: %s" % (type(e).__name__, e))
                 return []
 
+        def triples_fn(
+            shorty_text: str,
+            title: str,
+        ) -> List[Dict[str, Any]]:
+            from triple_extractor import extract_triples_openai
+
+            return extract_triples_openai(
+                shorty_text,
+                title,
+                lambda s, u: _openai_chat(s, u, max_tokens=2048, temperature=0.1),
+            )
+
     # New default: process from the processing_queue if requested (queue mode).
     if args.queue:
         process_queue_tasks(
@@ -775,7 +914,9 @@ def main():
             shorty_fn=shorty_fn,
             synth_q_fn=synth_q_fn,
             entity_fn=entity_fn,
+            triples_fn=triples_fn,
             limit=args.limit,
+            video_id=args.video_id,
         )
         return
 

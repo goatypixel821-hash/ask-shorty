@@ -126,6 +126,71 @@
       font-size: 11px;
       color: #9ca3af;
     }
+    .sources-list {
+      margin-top: 10px;
+      padding: 0;
+      list-style: none;
+    }
+    .sources-list li {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(148,163,184,0.1);
+      font-size: 12px;
+      color: #d1d5db;
+      flex-wrap: wrap;
+    }
+    .sources-list li:last-child { border-bottom: none; }
+    .src-title { font-weight: 500; color: #e5e7eb; }
+    .src-channel { color: #9ca3af; }
+    .src-date {
+      font-size: 11px;
+      color: #6b7280;
+      background: rgba(148,163,184,0.08);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+    /* ── Debug panel ─────────────────────────────────────────── */
+    .debug-wrap { margin-top: 16px; }
+    .debug-toggle-btn {
+      background: rgba(15,23,42,0.7);
+      border: 1px solid rgba(148,163,184,0.25);
+      border-radius: 8px;
+      color: #6b7280;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      padding: 4px 12px;
+      cursor: pointer;
+      box-shadow: none;
+      transition: color 0.15s;
+    }
+    .debug-toggle-btn:hover { color: #e5e7eb; border-color: rgba(148,163,184,0.5); }
+    .debug-panel { margin-top: 8px; }
+    .debug-log {
+      background: #020617;
+      border-radius: 10px;
+      border: 1px solid rgba(148,163,184,0.2);
+      padding: 10px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 480px;
+      overflow-y: auto;
+      color: #64748b;
+      line-height: 1.65;
+    }
+    .de-ts    { color: #334155; margin-right: 6px; }
+    .de-step  { color: #34d399; }
+    .de-rewrite { color: #60a5fa; }
+    .de-chunk  { color: #f59e0b; }
+    .de-shorty { color: #a78bfa; }
+    .de-synq   { color: #38bdf8; }
+    .de-context { color: #fb923c; }
+    .de-done  { color: #4ade80; font-weight: bold; }
+    .de-err   { color: #f87171; }
+    .de-dim   { color: #374151; }
+    .de-sub   { color: #4b5563; margin-left: 14px; display: block; }
+    .de-preview { color: #374151; margin-left: 28px; font-style: italic; display: block; }
     .error {
       margin-top: 10px;
       color: #fecaca;
@@ -159,20 +224,231 @@
         <div class="answer-title">Answer</div>
         <div class="answer-box" id="answer-box"></div>
         <div class="meta" id="meta-box"></div>
+        <ul class="sources-list" id="sources-list" style="display:none;"></ul>
       </div>
       <div class="meta" id="status-line" style="margin-top:8px;"></div>
+
+      <!-- Live debug panel -->
+      <div class="debug-wrap" id="debug-wrap" style="display:none;">
+        <button class="debug-toggle-btn" id="debug-toggle-btn" onclick="toggleDebug()">▶ pipeline debug</button>
+        <div class="debug-panel" id="debug-panel" style="display:none;">
+          <div class="debug-log" id="debug-log"></div>
+        </div>
+      </div>
     </div>
   </div>
 
   <script>
-    const askBtn = document.getElementById("ask-btn");
-    const qEl = document.getElementById("question");
-    const vidEl = document.getElementById("video-filter");
-    const errEl = document.getElementById("error");
-    const answerCard = document.getElementById("answer-card");
-    const answerBox = document.getElementById("answer-box");
-    const metaBox = document.getElementById("meta-box");
-    const statusLine = document.getElementById("status-line");
+    const askBtn        = document.getElementById("ask-btn");
+    const qEl           = document.getElementById("question");
+    const vidEl         = document.getElementById("video-filter");
+    const errEl         = document.getElementById("error");
+    const answerCard    = document.getElementById("answer-card");
+    const answerBox     = document.getElementById("answer-box");
+    const metaBox       = document.getElementById("meta-box");
+    const sourcesList   = document.getElementById("sources-list");
+    const statusLine    = document.getElementById("status-line");
+    const debugWrap     = document.getElementById("debug-wrap");
+    const debugPanel    = document.getElementById("debug-panel");
+    const debugToggleBtn= document.getElementById("debug-toggle-btn");
+    const debugLog      = document.getElementById("debug-log");
+
+    let _es = null;      // active EventSource
+    let _debugOpen = true;
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    function esc(s) {
+      if (s == null) return "";
+      return String(s)
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function fmtMs(ms) {
+      if (ms == null) return "";
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    }
+
+    function fmtReasonPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(triple => esc(Array.isArray(triple) ? triple.join(" ") : String(triple))).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    function fmtGlobalPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(step => {
+          if (!Array.isArray(step) && !(step instanceof Array)) return esc(String(step));
+          const s = step[0], r = step[1], o = step[2], vid = step[3];
+          if (vid != null) return esc(`${s} ${r} ${o} [${vid}]`);
+          return esc(step.join(" "));
+        }).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    function appendDebug(html) {
+      const div = document.createElement("div");
+      div.innerHTML = html;
+      debugLog.appendChild(div);
+      debugLog.scrollTop = debugLog.scrollHeight;
+    }
+
+    function toggleDebug() {
+      _debugOpen = !_debugOpen;
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " pipeline debug";
+    }
+
+    // ── SSE event rendering ────────────────────────────────────────────────
+    function handleDebugEvent(ev) {
+      const ts = ev.elapsed_ms != null
+        ? `<span class="de-ts">[${fmtMs(ev.elapsed_ms)}]</span>`
+        : "";
+
+      switch (ev.type) {
+
+        case "step":
+          appendDebug(`${ts}<span class="de-step">✓ ${esc(ev.label)}</span>`);
+          break;
+
+        case "rewrites": {
+          let h = `${ts}<span class="de-rewrite">◆ query rewrites</span>`;
+          h += `<span class="de-sub">original: ${esc(ev.original)}</span>`;
+          (ev.variants || []).forEach((v, i) => {
+            h += `<span class="de-sub">variant ${i+1}: ${esc(v)}</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "fusion": {
+          let h = `${ts}<span class="de-rewrite">◇ RRF fusion</span>`;
+          h += `<span class="de-sub">bm25_hits=${esc(ev.bm25_hits)} graph_hits=${esc(ev.graph_hits)} hsc_rank_len=${esc(ev.hsc_rank_len)} reason_rank_len=${esc(ev.reason_rank_len)} global_rank_len=${esc(ev.global_rank_len)}</span>`;
+          if (ev.query_type != null) {
+            h += `<span class="de-sub">query_type=${esc(ev.query_type)} layer=${esc(ev.layer_used)} event_hits=${esc(ev.event_hits)} segment_hits=${esc(ev.segment_hits)}</span>`;
+          }
+          if (ev.reasoning_paths && ev.reasoning_paths.length) {
+            h += `<span class="de-sub">graph reasoning (top ${ev.reasoning_paths.length})</span>`;
+            (ev.reasoning_paths || []).forEach((p, i) => {
+              const sc = (ev.path_scores && ev.path_scores[i] != null) ? ` score=${esc(ev.path_scores[i])}` : "";
+              h += `<span class="de-preview">[${i+1}]${sc} ${fmtReasonPath(p)}</span>`;
+            });
+          }
+          if (ev.rarity_scores && ev.rarity_scores.length) {
+            h += `<span class="de-sub">rarity_scores: ${esc(ev.rarity_scores.join(", "))}</span>`;
+          }
+          if (ev.node_frequencies_top && ev.node_frequencies_top.length) {
+            h += `<span class="de-preview">node_frequencies: ${esc(JSON.stringify(ev.node_frequencies_top))}</span>`;
+          }
+          (ev.rrf_top || []).forEach(row => {
+            h += `<span class="de-sub">· ${esc(row.video_id)} rrf=${esc(String(row.rrf))} [${esc(row.sources)}]</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "hsc": {
+          let h = `${ts}<span class="de-rewrite">◇ HSC</span>`;
+          h += `<span class="de-sub">type=${esc(ev.query_type)} layer=${esc(ev.layer_used)} reason=${esc(ev.route_reason)}</span>`;
+          h += `<span class="de-sub">event_hits=${esc(ev.event_hits)} segment_hits=${esc(ev.segment_hits)} reason_rank_len=${esc(ev.reason_rank_len)} global_rank_len=${esc(ev.global_rank_len)}</span>`;
+          if (ev.query_entities && ev.query_entities.length) {
+            h += `<span class="de-sub">entities: ${esc(ev.query_entities.join(", "))}</span>`;
+          }
+          if (ev.reasoning_paths && ev.reasoning_paths.length) {
+            (ev.reasoning_paths || []).forEach((p, i) => {
+              const sc = (ev.path_scores && ev.path_scores[i] != null) ? ` score=${esc(ev.path_scores[i])}` : "";
+              h += `<span class="de-preview">path[${i+1}]${sc}: ${fmtReasonPath(p)}</span>`;
+            });
+          }
+          if (ev.global_paths && ev.global_paths.length) {
+            (ev.global_paths || []).forEach((p, i) => {
+              const sc = (ev.global_path_scores && ev.global_path_scores[i] != null) ? ` score=${esc(ev.global_path_scores[i])}` : "";
+              const vids = (ev.videos_in_path && ev.videos_in_path[i]) ? ` videos=${esc(JSON.stringify(ev.videos_in_path[i]))}` : "";
+              h += `<span class="de-preview">global[${i+1}]${sc}${vids}: ${fmtGlobalPath(p)}</span>`;
+            });
+          }
+          if (ev.rarity_scores && ev.rarity_scores.length) {
+            h += `<span class="de-sub">rarity_scores: ${esc(ev.rarity_scores.join(", "))}</span>`;
+          }
+          if (ev.node_frequencies_top && ev.node_frequencies_top.length) {
+            h += `<span class="de-preview">node_frequencies: ${esc(JSON.stringify(ev.node_frequencies_top))}</span>`;
+          }
+          appendDebug(h);
+          break;
+        }
+
+        case "hits": {
+          const cls = {chunk:"de-chunk", shorty:"de-shorty", synq:"de-synq"}[ev.layer] || "de-step";
+          let h = `${ts}<span class="${cls}">▸ ${esc(ev.layer)} — ${ev.count} hit(s)</span>`;
+          (ev.hits || []).forEach(hit => {
+            const score = hit.score != null ? ` <span class="de-dim">score=${hit.score}</span>` : "";
+            const ci    = hit.chunk_index != null ? ` <span class="de-dim">chunk#${hit.chunk_index}</span>` : "";
+            const chan  = hit.channel ? ` <span class="de-dim">@${esc(hit.channel)}</span>` : "";
+            const wd    = hit.watch_date ? ` <span class="de-dim">${esc(hit.watch_date)}</span>` : "";
+            const fus   = hit.fusion_source ? ` <span class="de-dim">[${esc(hit.fusion_source)}]</span>` : "";
+            h += `<span class="de-sub">· ${esc(hit.title || hit.video_id)}${chan}${wd}${score}${ci}${fus}</span>`;
+            if (hit.preview) {
+              h += `<span class="de-preview">"${esc(hit.preview.substring(0,120))}…"</span>`;
+            }
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "context": {
+          let h = `${ts}<span class="de-context">■ context → LLM: ${ev.count} block(s)</span>`;
+          (ev.blocks || []).forEach((b, i) => {
+            const lines = b.split("\n");
+            const header  = lines[0] || "";
+            const preview = (lines.slice(1).join(" ").trim()).substring(0, 120);
+            h += `<span class="de-sub">[${i+1}] ${esc(header)}</span>`;
+            if (preview) h += `<span class="de-preview">"${esc(preview)}…"</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "done":
+          appendDebug(`${ts}<span class="de-done">✔ done in ${fmtMs(ev.total_elapsed_ms)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "error":
+          appendDebug(`${ts}<span class="de-err">✗ error: ${esc(ev.message)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "stream_end":
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "keepalive":
+          break; // silent
+      }
+    }
+
+    function startDebugStream(jobId) {
+      if (_es) { _es.close(); _es = null; }
+      debugLog.innerHTML = "";
+      debugWrap.style.display  = "block";
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " pipeline debug";
+
+      _es = new EventSource(`/api/ask/stream/${jobId}`);
+      _es.onmessage = (e) => {
+        try { handleDebugEvent(JSON.parse(e.data)); } catch (_) {}
+      };
+      _es.onerror = () => {
+        appendDebug(`<span class="de-err">stream connection lost</span>`);
+        _es.close(); _es = null;
+      };
+    }
 
     async function doAsk() {
       const q = qEl.value.trim();
@@ -182,7 +458,13 @@
       answerCard.style.display = "none";
       answerBox.textContent = "";
       metaBox.textContent = "";
+      sourcesList.innerHTML = "";
+      sourcesList.style.display = "none";
       statusLine.textContent = "";
+      // Reset debug panel for new query
+      if (_es) { _es.close(); _es = null; }
+      debugWrap.style.display = "none";
+      debugLog.innerHTML = "";
 
       if (!q) {
         errEl.textContent = "Please enter a question.";
@@ -218,6 +500,7 @@
         const jobId = data.job_id;
         console.log("[ask-ui] Received jobId:", jobId);
         statusLine.textContent = `Thinking... job #${jobId}`;
+        startDebugStream(jobId);
 
         // Poll for up to 5 minutes (300 seconds)
         const maxMs = 300000;
@@ -276,6 +559,34 @@
             metaBox.textContent = ctx.length
               ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`
               : "No context details available.";
+
+            // Render per-video source citations with watch dates
+            const sources = body.sources || [];
+            sourcesList.innerHTML = "";
+            if (sources.length) {
+              sources.forEach(src => {
+                const li = document.createElement("li");
+                const titleSpan = document.createElement("span");
+                titleSpan.className = "src-title";
+                titleSpan.textContent = src.title || src.video_id;
+                li.appendChild(titleSpan);
+                if (src.channel) {
+                  const chanSpan = document.createElement("span");
+                  chanSpan.className = "src-channel";
+                  chanSpan.textContent = "by " + src.channel;
+                  li.appendChild(chanSpan);
+                }
+                if (src.watch_date) {
+                  const dateSpan = document.createElement("span");
+                  dateSpan.className = "src-date";
+                  dateSpan.textContent = "watched: " + src.watch_date;
+                  li.appendChild(dateSpan);
+                }
+                sourcesList.appendChild(li);
+              });
+              sourcesList.style.display = "block";
+            }
+
             answerCard.style.display = "block";
             askBtn.disabled = false;
             askBtn.textContent = "Ask Shorty";
@@ -298,6 +609,15 @@
         // Button will be re-enabled by polling completion / error handlers.
       }
     }
+
+    // Pre-fill from Observatory query params (?q=...&video_ids=...)
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const pq = params.get("q");
+      const pv = params.get("video_ids");
+      if (pq) qEl.value = pq;
+      if (pv) vidEl.value = pv;
+    })();
 
     askBtn.addEventListener("click", doAsk);
     qEl.addEventListener("keydown", (e) => {

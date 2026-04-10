@@ -24,7 +24,7 @@ if sys.platform == 'win32':
         except Exception:
             pass
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, redirect
 import sqlite3
 
 from transcript_database import TranscriptDatabase
@@ -137,6 +137,12 @@ def root():
             'status': '/api/status'
         }
     })
+
+
+@app.route('/tools/quick-fetch', methods=['GET'])
+def quick_fetch_redirect():
+    """Redirect old bookmarklet URL to /grab so the same paste flow works."""
+    return redirect('/grab?' + request.query_string.decode('utf-8'), code=302)
 
 
 @app.route('/grab', methods=['GET'])

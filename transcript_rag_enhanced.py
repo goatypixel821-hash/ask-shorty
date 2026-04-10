@@ -21,10 +21,6 @@ from typing import List, Dict, Tuple, Optional
 _shared_model = None
 _model_lock = threading.Lock()
 
-# Global shared Chroma client to avoid race conditions on initialization
-_shared_chroma_client = None
-_chroma_lock = threading.Lock()
-
 # Safe print function for Windows console encoding
 def safe_print(*args, **kwargs):
     """Print that handles emoji encoding errors on Windows"""
@@ -60,34 +56,53 @@ def safe_print(*args, **kwargs):
 class EnhancedTranscriptRAG:
     """Enhanced RAG system with chunking, hybrid search, and query expansion"""
     
-    def __init__(self, transcript_db=None, chroma_dir=None):
+    def __init__(self, transcript_db=None, chroma_dir=None, embedding_model_name=None):
         # Get base directory relative to this script
         base_dir = Path(__file__).parent
-        
+
+        # Explicit args take priority, then env vars, then defaults.
+        import os as _os
+        if transcript_db is None:
+            transcript_db = _os.environ.get("ASK_SHORTY_DB_PATH") or None
+        if chroma_dir is None:
+            chroma_dir = _os.environ.get("ASK_SHORTY_CHROMA_PATH") or None
+
         if transcript_db is None:
             self.transcript_db = base_dir / 'data' / 'transcripts.db'
         else:
             self.transcript_db = Path(transcript_db)
             
         if chroma_dir is None:
-            self.chroma_dir = base_dir / 'data' / 'transcript_chroma'
+            self.chroma_dir = base_dir / 'data' / 'transcript_chroma_new'
         else:
             self.chroma_dir = Path(chroma_dir)
-        
-        # Use shared model instance to prevent PyTorch tensor conflicts
+
+        model_name = (embedding_model_name or "").strip() or None
+        if model_name is None:
+            sidecar = self.chroma_dir / "chroma_model.txt"  # type: ignore[attr-defined]
+            mf = base_dir / "data" / "chroma_model.txt"
+            for path in (sidecar, mf):
+                if path.is_file():
+                    try:
+                        model_name = path.read_text(encoding="utf-8").strip() or None
+                        if model_name:
+                            break
+                    except OSError:
+                        pass
+        if not model_name:
+            model_name = "all-MiniLM-L6-v2"
+
         global _shared_model, _model_lock
-        with _model_lock:
-            if _shared_model is None:
-                _shared_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.embedding_model = _shared_model
+        if model_name == "all-MiniLM-L6-v2":
+            with _model_lock:
+                if _shared_model is None:
+                    _shared_model = SentenceTransformer("all-MiniLM-L6-v2")
+                self.embedding_model = _shared_model
+        else:
+            self.embedding_model = SentenceTransformer(model_name)
 
-        # Use shared Chroma client with a lock to avoid race conditions
-        global _shared_chroma_client, _chroma_lock
-        with _chroma_lock:
-            if _shared_chroma_client is None:
-                _shared_chroma_client = chromadb.PersistentClient(path=str(self.chroma_dir))
-            self.chroma_client = _shared_chroma_client
-
+        # Each instance gets its own Chroma client (no shared global) to avoid crash on Windows during writes
+        self.chroma_client = chromadb.PersistentClient(path=str(self.chroma_dir))
         self.collection = self.chroma_client.get_or_create_collection(
             name="transcripts",
             metadata={"hnsw:space": "cosine"}
@@ -99,6 +114,7 @@ class EnhancedTranscriptRAG:
         safe_print("✅ Enhanced Transcript RAG initialized")
         safe_print(f"📄 Transcript DB: {self.transcript_db}")
         safe_print(f"📚 Chroma directory: {self.chroma_dir}")
+        safe_print(f"🧠 Embedding model: {model_name}")
 
     # ---------- Embedding helpers ----------
 
@@ -122,6 +138,8 @@ class EnhancedTranscriptRAG:
         Index a single video's transcript into Chroma, along with optional
         Shorty and synthetic questions.
 
+        Uses upsert (insert or update by id) so no delete is needed; avoids
+        collection.delete() which can trigger 3221225477 crash on Windows.
         - Transcript is split into chunks and stored with type="chunk".
         - Shorty (if provided) stored with type="shorty".
         - Synthetic questions stored with type="synthetic_question".
@@ -130,19 +148,12 @@ class EnhancedTranscriptRAG:
             safe_print(f"[WARN] Empty transcript for {video_id}, skipping index.")
             return
 
-        # IMPORTANT: clear any existing items for this video_id first so we
-        # don't hit duplicate ID errors and always get a clean upsert.
-        try:
-            self.collection.delete(where={"video_id": video_id})
-        except Exception as e:
-            safe_print(f"[WARN] Failed to delete existing Chroma items for {video_id}: {e}")
-
         # Basic paragraph / sentence-ish splitting with overlap
         chunks = self._chunk_transcript(text)
         if not chunks:
             chunks = [text.strip()]
 
-        # Index transcript chunks
+        # Index transcript chunks (upsert overwrites existing ids for this video)
         chunk_ids = [f"{video_id}:chunk:{i}" for i in range(len(chunks))]
         chunk_metadatas = [
             {
@@ -154,7 +165,7 @@ class EnhancedTranscriptRAG:
         ]
         chunk_embeddings = self._embed_texts(chunks)
 
-        self.collection.add(
+        self.collection.upsert(
             ids=chunk_ids,
             embeddings=chunk_embeddings,
             metadatas=chunk_metadatas,
@@ -165,7 +176,7 @@ class EnhancedTranscriptRAG:
         if shorty and shorty.strip():
             shorty_id = f"{video_id}:shorty"
             shorty_emb = self._embed_texts([shorty])[0]
-            self.collection.add(
+            self.collection.upsert(
                 ids=[shorty_id],
                 embeddings=[shorty_emb],
                 metadatas=[
@@ -191,7 +202,7 @@ class EnhancedTranscriptRAG:
                     }
                     for i in range(len(clean_qs))
                 ]
-                self.collection.add(
+                self.collection.upsert(
                     ids=q_ids,
                     embeddings=q_embs,
                     metadatas=q_metas,

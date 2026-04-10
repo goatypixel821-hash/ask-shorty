@@ -11,8 +11,10 @@ from typing import Optional, List, Dict, Any
 
 
 class TranscriptDatabase:
-    def __init__(self, db_path: str = "data/transcripts.db"):
+    def __init__(self, db_path: str = None):
         """Initialize transcript database"""
+        if db_path is None:
+            db_path = os.environ.get("ASK_SHORTY_DB_PATH") or "data/transcripts.db"
         self.db_path = db_path
         self.ensure_db_exists()
 
@@ -142,10 +144,16 @@ class TranscriptDatabase:
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     error TEXT,
+                    attempts INTEGER DEFAULT 0,
                     FOREIGN KEY (video_id) REFERENCES videos (video_id)
                 )
                 """
             )
+            # Migration: add attempts column if missing (existing DBs)
+            cursor.execute("PRAGMA table_info(processing_queue)")
+            pq_columns = [row[1] for row in cursor.fetchall()]
+            if "attempts" not in pq_columns:
+                cursor.execute("ALTER TABLE processing_queue ADD COLUMN attempts INTEGER DEFAULT 0")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_processing_queue_status_created "
                 "ON processing_queue(status, created_at)"
@@ -153,6 +161,149 @@ class TranscriptDatabase:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_processing_queue_video_id "
                 "ON processing_queue(video_id)"
+            )
+
+            # Knowledge-graph triples (subject–relation–object) extracted from Shorties
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    object TEXT NOT NULL,
+                    confidence REAL DEFAULT 1.0,
+                    source TEXT DEFAULT 'shorty',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_facts_video_id ON facts(video_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)"
+            )
+
+            # Graph salience: persisted node/edge frequencies (rebuilt from facts)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fact_nodes (
+                    node TEXT PRIMARY KEY,
+                    frequency INTEGER NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fact_edges (
+                    subject TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    object TEXT NOT NULL,
+                    frequency INTEGER NOT NULL,
+                    PRIMARY KEY (subject, relation, object)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fact_frequency_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    stale INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT OR IGNORE INTO fact_frequency_meta (id, stale) VALUES (1, 1)"
+            )
+
+            # Global normalized graph (cross-video); rebuilt from facts
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS global_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_norm TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    object_norm TEXT NOT NULL,
+                    subject_raw TEXT NOT NULL,
+                    object_raw TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    UNIQUE (subject_norm, relation, object_norm, video_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_facts_subject ON global_facts(subject_norm)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_facts_object ON global_facts(object_norm)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_global_facts_video ON global_facts(video_id)"
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_alias (
+                    alias TEXT PRIMARY KEY,
+                    canonical TEXT NOT NULL
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS global_graph_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    stale INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            cursor.execute(
+                "INSERT OR IGNORE INTO global_graph_meta (id, stale) VALUES (1, 1)"
+            )
+
+            # HSC: time-bounded segment summaries (optional embedding JSON)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    start_time REAL,
+                    end_time REAL,
+                    summary TEXT,
+                    embedding TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_segments_video_id ON segments(video_id)"
+            )
+
+            # HSC: structured incidents (causal events)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    title TEXT,
+                    cause TEXT,
+                    effect TEXT,
+                    systems TEXT,
+                    raw_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_video_id ON events(video_id)"
             )
 
             conn.commit()
@@ -239,10 +390,18 @@ class TranscriptDatabase:
         """
         Enqueue LLM processing tasks for a video.
 
-        Tasks are strings: 'shorty', 'synthetic_questions', 'entities'.
+        Tasks are strings: 'shorty', 'synthetic_questions', 'entities',
+        'segments', 'events', 'triples' (HSC segment/event layers).
         """
         if tasks is None:
-            tasks = ["shorty", "synthetic_questions", "entities"]
+            tasks = [
+                "shorty",
+                "synthetic_questions",
+                "entities",
+                "segments",
+                "events",
+                "triples",
+            ]
         if not tasks:
             return
 
@@ -431,6 +590,178 @@ class TranscriptDatabase:
 
                 return info
             return None
+
+    def replace_facts_for_video(
+        self,
+        video_id: str,
+        triples: List[Dict[str, Any]],
+        source: str = "shorty",
+    ) -> int:
+        """Replace all facts for a video with new triples. Each triple: subject, relation, object."""
+        n = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM facts WHERE video_id = ?", (video_id,))
+            for t in triples:
+                sub = (t.get("subject") or "").strip()
+                rel = (t.get("relation") or "").strip()
+                obj = (t.get("object") or "").strip()
+                if not sub or not rel or not obj:
+                    continue
+                conf = float(t.get("confidence", 1.0) or 1.0)
+                cursor.execute(
+                    """
+                    INSERT INTO facts (video_id, subject, relation, object, confidence, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (video_id, sub, rel, obj, conf, source),
+                )
+                n += 1
+            conn.commit()
+        self._mark_fact_frequency_stale()
+        self._mark_global_graph_stale()
+        return n
+
+    def _mark_global_graph_stale(self) -> None:
+        """Invalidate global_facts-derived graph; next load rebuilds."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO global_graph_meta (id, stale) VALUES (1, 1)"
+                )
+                conn.execute("UPDATE global_graph_meta SET stale = 1 WHERE id = 1")
+                conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _mark_fact_frequency_stale(self) -> None:
+        """Invalidate cached fact_nodes / fact_edges; next load rebuilds."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO fact_frequency_meta (id, stale) VALUES (1, 1)"
+                )
+                conn.execute(
+                    "UPDATE fact_frequency_meta SET stale = 1 WHERE id = 1"
+                )
+                conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def count_facts_for_video(self, video_id: str) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM facts WHERE video_id = ?", (video_id,))
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    def get_facts_for_video(self, video_id: str) -> List[Dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, subject, relation, object, confidence, source
+                FROM facts WHERE video_id = ? ORDER BY id
+                """,
+                (video_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def replace_segments_for_video(
+        self,
+        video_id: str,
+        segments: List[Dict[str, Any]],
+    ) -> int:
+        """Replace segment rows for a video. Each dict: start_time, end_time, summary, embedding (optional)."""
+        import json as _json
+
+        n = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM segments WHERE video_id = ?", (video_id,))
+            for seg in segments:
+                st = seg.get("start_time")
+                et = seg.get("end_time")
+                summ = (seg.get("summary") or "").strip()
+                if not summ:
+                    continue
+                emb = seg.get("embedding")
+                emb_s = None
+                if emb is not None:
+                    emb_s = emb if isinstance(emb, str) else _json.dumps(emb)
+                cur.execute(
+                    """
+                    INSERT INTO segments (video_id, start_time, end_time, summary, embedding)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        video_id,
+                        float(st) if st is not None else None,
+                        float(et) if et is not None else None,
+                        summ,
+                        emb_s,
+                    ),
+                )
+                n += 1
+            conn.commit()
+        return n
+
+    def replace_events_for_video(
+        self,
+        video_id: str,
+        events: List[Dict[str, Any]],
+    ) -> int:
+        """Replace event rows for a video."""
+        import json as _json
+
+        n = 0
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM events WHERE video_id = ?", (video_id,))
+            for ev in events:
+                title = (ev.get("title") or "").strip()
+                if not title:
+                    continue
+                cause = (ev.get("cause") or "").strip()
+                effect = (ev.get("effect") or "").strip()
+                systems = ev.get("systems") or []
+                if isinstance(systems, list):
+                    sys_s = _json.dumps(systems)
+                else:
+                    sys_s = str(systems)
+                raw = ev.get("raw_json")
+                raw_s = raw if isinstance(raw, str) else _json.dumps(ev)
+                cur.execute(
+                    """
+                    INSERT INTO events (video_id, title, cause, effect, systems, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (video_id, title, cause, effect, sys_s, raw_s),
+                )
+                n += 1
+            conn.commit()
+        return n
+
+    def count_segments_for_video(self, video_id: str) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT COUNT(*) FROM segments WHERE video_id = ?", (video_id,))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+            except sqlite3.OperationalError:
+                return 0
+
+    def count_events_for_video(self, video_id: str) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT COUNT(*) FROM events WHERE video_id = ?", (video_id,))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+            except sqlite3.OperationalError:
+                return 0
 
     def get_stats(self) -> Dict[str, int]:
         """Get database statistics"""

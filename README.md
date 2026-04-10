@@ -11,8 +11,9 @@ Video and podcast content is hard to search. You either watch everything or miss
 - Misses key details (names, numbers, versions)
 - Splits causal chains across multiple chunks
 - Returns noisy context filled with filler and digressions
+- Can't connect knowledge **across** videos
 
-Ask Shorty was built to fix this for a real use case: searching a personal YouTube history and asking *“Where did I hear X?”* without re‑watching hours of content.
+Ask Shorty was built to fix this for a real use case: searching a personal YouTube history and asking *"Where did I hear X?"* without re‑watching hours of content.
 
 ---
 
@@ -24,104 +25,130 @@ Ask Shorty makes any video or podcast instantly queryable:
 - Ask a question
 - Get a precise answer with context and citations
 
-Under the hood, Ask Shorty adds a **dense compression layer** on top of normal RAG. Each video gets a **Shorty**: a compact, machine‑oriented intelligence brief that sits alongside transcript chunks and synthetic questions in the index.
+Under the hood, Ask Shorty adds a **dense compression layer** and **multi-layer retrieval** on top of normal RAG. Each video gets a **Shorty**: a compact, machine‑oriented intelligence brief. Questions are then answered through five retrieval layers fused together — not just vector search.
 
 ---
 
 ## The Shorty
 
-The **Shorty** is the core innovation.
+The **Shorty** is the core innovation — a retrieval-optimized compression of each video's content.
 
 - Generated once per transcript at index time
-- ~90–97 % token reduction vs. the original
-- Designed to retain ~95 % of answerable information, including:
+- ~90–97 % token reduction vs. the original
+- Designed to retain ~95 % of answerable information, including:
   - All named entities, systems, and people
   - Causal chains and relationships
   - Key numbers, dates, and technical details
   - Speaker framing and interpretation
   - Micro‑details that typical summarization drops
 
-Shorties are stored in SQLite (`transcripts.shorty`) and also vectorized into Chroma as their own document type (`type="shorty"`).
-
-They do **not** replace RAG over transcript chunks – they act as a **supplemental retrieval layer**. When a question is broad or the relevant fact is rare, the Shorty often catches it even when chunk‑only RAG would miss it.
+Shorties are stored in SQLite and also vectorized into Chroma as their own document type. They do **not** replace RAG over transcript chunks — they act as a **supplemental retrieval layer** that catches things chunk-only RAG misses.
 
 ---
 
-## How It Works
+## Multi-Layer Retrieval
 
-```text
-Video / podcast URL
-↓
-Transcript extracted and stored in SQLite
-↓
-LLM generates Shorty + synthetic questions + entities
-↓
-All representations vectorized into Chroma
-  - chunks
-  - Shorty
-  - synthetic questions
-↓
-User query comes in
-↓
-Optional metadata filtering (channel / date)
-↓
-Query rewriting (multi-angle variants)
-↓
-Multi-representation retrieval in Chroma
-  - type=shorty
-  - type=syntheticquestion
-  - type=chunk
-↓
-Best Shorty + questions + chunks assembled as context
-↓
-LLM answers with citations back to videos
-```
+Ask Shorty doesn't rely on a single search method. It fuses **five retrieval layers** using Reciprocal Rank Fusion (RRF):
 
-This multi‑representation retrieval (Shorty + synthetic questions + chunks) gives much higher recall than naïve “chunk‑only” RAG.
+| Layer | What it does |
+|-------|-------------|
+| **Chroma vector search** | Semantic similarity across chunks, Shorties, and synthetic questions |
+| **BM25 keyword search** | Exact keyword matching (catches names, acronyms, specific terms) |
+| **Cross-encoder reranker** | Neural reranking of top candidates for precision |
+| **Per-video graph reasoning** | Multi-hop traversal of subject→relation→object triples within a video |
+| **Global knowledge graph** | Cross-video graph reasoning over normalized entities and facts |
+
+The query router (HSC — Hierarchical Semantic Compression) classifies each question as a fact lookup, event query, or general question and selects the appropriate layers.
+
+---
+
+## Global Knowledge Graph
+
+Every video gets entity extraction and triple extraction (subject → relation → object facts). These are normalized and merged into a **global knowledge graph** that spans all videos.
+
+This enables:
+- **Cross-video reasoning**: "How does X from video A connect to Y from video B?"
+- **Multi-hop paths**: Following chains of relationships across sources
+- **Agreement scoring**: Facts confirmed by multiple videos are boosted
+- **Entity normalization**: Different spellings/aliases resolve to the same node
 
 ---
 
 ## Architecture
 
+```text
+Video / podcast URL
+       ↓
+Transcript extracted and stored in SQLite
+       ↓
+LLM generates:
+  • Shorty (dense retrieval brief)
+  • Synthetic questions (intent matching)
+  • Entities (people, orgs, concepts, tech)
+  • Triples (subject → relation → object facts)
+       ↓
+All representations indexed:
+  • Chroma (vector embeddings)
+  • BM25 (keyword index)
+  • Knowledge graph (entities + triples)
+       ↓
+User asks a question
+       ↓
+HSC query router classifies question type
+       ↓
+Multi-layer retrieval:
+  • Chroma semantic search
+  • BM25 keyword search
+  • Graph reasoning (per-video + global)
+  • Cross-encoder reranking
+       ↓
+Reciprocal Rank Fusion merges all results
+       ↓
+LLM answers with citations back to source videos
+```
+
 ### Storage
 
-- **SQLite** (`data/transcripts.db`) – source of truth for:
-  - `videos` – video metadata (id, title, channel, url, watch date, etc.)
-  - `transcripts` – raw transcript text plus `shorty` and timestamps
-  - `entities` – extracted entities with types and aliases
-  - `syntheticquestions` – generated questions per video
-  - `processingqueue` – background tasks (`shorty | syntheticquestions | entities`)
+- **SQLite** (`data/transcripts.db`) — source of truth for videos, transcripts, Shorties, entities, synthetic questions, triples (facts), global normalized facts, processing queue
+- **Chroma** (`data/transcript_chroma`) — vector index with cosine similarity (SentenceTransformer `all-MiniLM-L6-v2`)
+- **BM25 index** — keyword search built from all document types
 
-- **Chroma** (`data/transcript_chroma`) – vector index with a single collection `transcripts` using cosine similarity.  
-  Each record has:
-  - `embedding` (SentenceTransformer `all-MiniLM-L6-v2`)
-  - `metadata.type` ∈ `{ "chunk", "shorty", "syntheticquestion" }`
-  - `metadata.videoid`
-  - `metadata.chunkindex` (for `type="chunk"`)
+SQLite is the canonical store; Chroma and BM25 are derived indexes that can be rebuilt.
 
-SQLite is the canonical store; Chroma is a derived index that can be rebuilt from SQLite if needed.
+### Key Components
 
-### Components
+| File | Purpose |
+|------|---------|
+| `transcript_database.py` | SQLite schema, migrations, all table management |
+| `shorty_generator.py` | LLM-powered Shorty + synthetic question generation |
+| `entity_extractor.py` | Entity extraction (people, orgs, concepts, tech) |
+| `triple_extractor.py` | Subject→relation→object fact extraction |
+| `bm25_index.py` | Okapi BM25 keyword search index |
+| `reranker.py` | Cross-encoder neural reranking |
+| `transcript_rag_enhanced.py` | Chroma chunking and vector search |
+| `graph_search.py` | Per-video graph reasoning over triples |
+| `hsc/` | Hierarchical Semantic Compression — query routing, global graph, entity normalization |
+| `ask_shorty.py` | Query pipeline — orchestrates all retrieval layers + RRF fusion |
+| `ask_shorty_app.py` | Ask UI (Flask) with SSE streaming debug panel |
+| `video_grabber.py` | Bookmarklet-based video ingest |
+| `batch_processor.py` | Queue-based LLM task processing |
+| `build_courses.py` | Auto-generates structured courses from video clusters |
+| `build_clusters.py` | Topic clustering across the video library |
+| `evaluate_rag.py` | Retrieval evaluation framework (Recall@K, MRR) |
+| `reindex_all.py` | Rebuild all indexes from SQLite |
 
-- `transcriptdatabase.py` – SQLite schema, migrations, and enqueue helpers
-- `simpletranscriptfetcher.py` – fetches YouTube transcripts and persists them
-- `video_grabber.py` / `start_grabber.py` – bookmarklet-based ingest (Flask, default port 5000). Bookmarklet passes video URL, title, and channel; you paste the transcript from YouTube’s “Show transcript” and click Save & Vectorize.
-- `shortygenerator.py` – uses Anthropic to generate Shorty + synthetic questions
-- `entityextractor.py` – extracts entities via Anthropic tool‑use or OpenAI‑compatible JSON prompts
-- `transcriptrag.py` / `transcriptragenhanced.py` – chunking and Chroma integration (`index_single_transcript`, hybrid search)
-- `enqueuebackfill.py` – backfill script to enqueue Shorty / questions / entities for existing transcripts
-- `batchprocessor.py` – processes `processingqueue` tasks in queue or legacy batch mode
-- `askshorty.py` – query pipeline (metadata filter → query rewrite → multi‑layer retrieval → answer)
-- `askshortyapp.py` – Ask UI (Flask, default port 5001)
-- `libraryapp.py` – library/admin UI for browsing videos, Shorties, entities, questions (Flask, default port 5002)
+### Web UIs
+
+- **Ask Shorty** (`/ask`) — question answering with real-time debug panel showing all retrieval layers
+- **Knowledge Explorer** (`/knowledge`) — browse the knowledge graph, entities, facts, connections
+- **Course Viewer** (`/courses`) — auto-generated courses from video clusters
+- **Library Admin** — browse videos, Shorties, entities, queue status
 
 ---
 
-## Running Ask Shorty Locally
+## Running Locally
 
 ### 1. Install dependencies
-
-Example (adjust as needed):
 
 ```bash
 pip install flask anthropic chromadb sentence-transformers youtube-transcript-api yt-dlp
@@ -129,124 +156,105 @@ pip install flask anthropic chromadb sentence-transformers youtube-transcript-ap
 
 ### 2. Set environment variables
 
-Minimum for Anthropic‑based path:
-
 ```bash
-# Windows PowerShell example
+# Anthropic (primary LLM path)
 set ANTHROPIC_API_KEY=your_key_here
-```
 
-Optional OpenAI‑compatible batch/entity path:
-
-```bash
+# Optional: OpenAI-compatible provider for batch processing (e.g. local Ollama)
 set OPENAI_API_KEY=your_key_here
-set OPENAI_BASE_URL=http://localhost:8000/v1   # or your provider
-set OPENAI_MODEL=gpt-3.5-turbo                 # or another model
+set OPENAI_BASE_URL=http://localhost:8000/v1
+set OPENAI_MODEL=qwen2.5:14b
 ```
 
-`GRABBER_PORT` defaults to `5000` if not set.
-
-### 3. Start the grabber and add videos (manual transcript)
+### 3. Start the grabber and add videos
 
 ```bash
 python start_grabber.py
 ```
 
-Use **YouTube’s built-in transcript**: on the video page click **···** (more) under the player → **Show transcript** → select all (Ctrl+A) → copy (Ctrl+C). Then open the Ask Shorty grab page (your bookmarklet should point to `http://localhost:5000/grab?url=<video_url>&title=<title>&channel=<channel>`), paste the transcript into the text area, and click **Save & Vectorize**. The service stores the transcript and metadata, vectorizes for search, and queues Shorty / synthetic questions / entities for batch processing.
-
-Endpoints:
-
-- `GET /grab?url=...&title=...&channel=...` – bookmarklet target; shows video info and a text area to paste the transcript
-- `POST /api/save-transcript` – save pasted transcript and metadata, then vectorize and queue LLM tasks
+Use YouTube's built-in transcript: click **···** under the video → **Show transcript** → select all → copy. Open the grab page, paste the transcript, click Save & Vectorize.
 
 #### Bookmarklet
 
-Use this bookmarklet on a YouTube watch page to open the Ask Shorty grab form with the current video’s URL, title, and channel filled in. Make sure the grabber is running on port 5000 first.
-
-**Code (paste as the bookmark URL):**
+Paste this as a bookmark URL to grab videos with one click:
 
 ```javascript
 javascript:(function(){var v=window.location.href;if(!v.includes('youtube.com/watch')){alert('Not a YouTube video!');return;}var t=document.title.replace(' - YouTube','');var c='';try{c=document.querySelector('ytd-channel-name a').textContent.trim();}catch(e){try{c=document.querySelector('.ytd-channel-name a').textContent.trim();}catch(e2){}}window.open('http://localhost:5000/grab?url='+encodeURIComponent(v)+'&title='+encodeURIComponent(t)+'&channel='+encodeURIComponent(c),'_blank','width=600,height=600,left=200,top=200');})();
 ```
 
-**How to install:**
-
-- **Drag to bookmarks bar:** Create a new bookmark (e.g. “Add to Ask Shorty”), then edit it and paste the code above into the **URL** field. Or copy the one-line code, then drag a link that uses it onto your bookmarks bar (some browsers support this).
-- **Create bookmark manually:** Add a new bookmark (bookmarks bar or bookmarks manager), set the **URL** to the full line above (starting with `javascript:`). Save. When you’re on a YouTube video page, click the bookmark to open the grab form.
-
-### 4. Generate Shorties, synthetic questions, entities
-
-Backfill existing transcripts:
+### 4. Process the queue
 
 ```bash
-python enqueuebackfill.py --db-path data/transcripts.db --dry-run
-# inspect, then:
-python enqueuebackfill.py --db-path data/transcripts.db
+python batch_processor.py --queue --limit 50 --provider anthropic
 ```
 
-Process the queue (Anthropic path):
+This generates Shorties, synthetic questions, and entities for each video.
+
+### 5. Extract triples and build the knowledge graph
 
 ```bash
-python batchprocessor.py --queue --limit 50 --provider anthropic
+python batch_processor.py --queue --limit 50 --provider anthropic
+python reindex_all.py
 ```
 
-This populates `transcripts.shorty`, `syntheticquestions`, `entities` and (in legacy batch mode) can also call into Chroma indexing.
-
-> Note: In queue mode, Chroma reindexing is intentionally **not** run inside the queue loop because some Chroma code paths can terminate the worker. Run a separate reindex script from SQLite when needed.
-
-### 5. Start the Ask Shorty UI
+### 6. Start Ask Shorty
 
 ```bash
-python askshortyapp.py
+python ask_shorty_app.py
 ```
 
-Open `http://localhost:5001/ask` to:
+Open `http://localhost:5001/ask` to ask questions with the full multi-layer retrieval pipeline.
 
-- Type a question
-- Optionally restrict to specific `videoid`s
-- Get answers with context drawn from transcript chunks, Shorties, and synthetic questions
+---
 
-### 6. Explore the library
+## How It Compares
 
-```bash
-python libraryapp.py
-```
-
-Open `http://localhost:5002` to browse:
-
-- Videos and metadata
-- Full transcripts
-- Per‑video Shorty
-- Synthetic questions
-- Entities and processing queue status
+| Feature | Typical RAG | Karpathy's LLM Wiki | Ask Shorty |
+|---------|------------|---------------------|------------|
+| Source handling | Chunk and embed | Compile into wiki pages | Compress into Shorties + extract entities + triples |
+| Retrieval | Vector similarity | Index file scanning | 5-layer fusion (vector + BM25 + reranker + graph + global graph) |
+| Cross-source reasoning | None | Wiki cross-references | Global knowledge graph with multi-hop BFS |
+| Knowledge structure | Flat chunks | Interlinked markdown | SQLite + vector index + BM25 + knowledge graph |
+| Quality measurement | None | Manual review / lint | Evaluation framework (Recall@K, MRR against golden answers) |
+| Self-healing | No | LLM lint pass | Entity normalization + deduplication + agreement scoring |
 
 ---
 
 ## Scale Notes
 
-Ask Shorty is designed to handle tens of thousands of videos on a single machine. With 30–40k videos, plus chunks, Shorties, and synthetic questions, the Chroma collection may reach 500k–1M vectors. For significantly larger libraries or multi‑user deployments, consider:
-
-- Migrating from SQLite to PostgreSQL
-- Migrating the vector layer from Chroma to a dedicated service (e.g. Qdrant or another hosted vector DB)
+Designed to handle tens of thousands of videos on a single machine. Supports both cloud LLMs (Anthropic) and local models (Ollama with Qwen, Llama, etc.) for processing. For significantly larger deployments, consider migrating from SQLite to PostgreSQL and from Chroma to a dedicated vector service.
 
 ---
 
 ## Roadmap
 
-- Standardized Shorty template (CONTEXT, INCIDENTS, ATTACK FLOW, IMPACT, MICRO‑DETAILS, TIMELINE)
-- Automatic fact triple extraction for a lightweight knowledge‑graph layer
-- Vast.ai / OpenAI‑compatible provider support for bulk processing
-- PostgreSQL and external vector DB support at larger scales
-- Multi‑user support and authentication
-- Non‑YouTube sources (podcasts, local files, other platforms)
-- Analytics on which layer (Shorty / chunk / synthetic question) answered each query
-- Improved channel‑ and time‑based filters and timeline search
+- [x] Dense Shorty compression layer
+- [x] Multi-representation retrieval (Shorty + chunks + synthetic questions)
+- [x] Entity and triple extraction
+- [x] BM25 keyword search + cross-encoder reranking
+- [x] Per-video graph reasoning
+- [x] Global cross-video knowledge graph
+- [x] HSC query routing
+- [x] Reciprocal Rank Fusion across all layers
+- [x] Evaluation framework
+- [x] Course auto-generation from topic clusters
+- [x] Knowledge explorer UI
+- [x] Local LLM support (Ollama / vast.ai)
+- [ ] Spaced repetition from knowledge graph
+- [ ] Real-time ingest (process as you watch)
+- [ ] Multi-user support and authentication
+- [ ] Non-YouTube sources (podcasts, local files, meetings)
+- [ ] PostgreSQL and external vector DB support at scale
 
 ---
 
 ## Vision
 
-Anyone should be able to ask questions across their entire video library — podcasts, lectures, meetings, research — and get precise answers instantly. Ask Shorty provides the **Shorty + RAG** architecture that makes that possible.
+The AI industry spent 3 years building vector databases to search through messy document dumps. Retrieve a chunk, generate an answer, conversation ends, knowledge gone. RAG just searches the graveyard faster.
+
+Ask Shorty takes a different approach: **compress once, index deeply, reason across sources**. Every video you add makes the system smarter. Facts connect across videos. Knowledge compounds instead of scattering.
+
+Anyone should be able to ask questions across their entire video library — podcasts, lectures, meetings, research — and get precise answers instantly.
 
 ---
 
@@ -254,46 +262,13 @@ Anyone should be able to ask questions across their entire video library — pod
 
 Ask Shorty is designed for **personal, non-commercial use** to index videos you have watched for research and reference purposes.
 
-### Compliance Notes
+- **Fair Use**: Transcripts are compressed into transformative summaries. Original videos are always cited with links to creators.
+- **No Scraping**: Uses YouTube's built-in transcript feature. The bookmarklet only receives the URL, title, and channel you provide.
+- **Local Only**: All data stored on your machine (SQLite + Chroma). No cloud uploads, no third-party sharing.
+- **Respect Creators**: Always link back to original videos. Do not redistribute transcripts or derivatives.
 
-**Copyright Fair Use:**
-- Transcripts are compressed into transformative summaries (Shorties)
-- Original videos are always cited with links to creators
-- No redistribution of copyrighted content
-- Intended for research, scholarship, and personal reference
-
-**YouTube Terms of Service:**
-- Use YouTube’s built-in transcript feature: click **···** under the video → **Show transcript** → copy the text and paste it into Ask Shorty. No automated scraping; the bookmarklet only receives the URL, title, and channel that you provide from the page.
-
-### Privacy & Data
-
-- All data stored **locally** on your machine (SQLite + Chroma)
-- No cloud uploads, no third-party sharing
-- You control your data entirely
-
-### Usage Modes
-
-**Personal Use (Current):**
-- Stores transcripts, Shorties, chunks for full RAG capabilities
-- Intended for personal libraries on your own machine
-
-**Future: Compliant Mode (For Sharing):**
-- Will store only transformative data (Shorties, entities, embeddings)
-- Raw transcripts deleted after processing
-- Re-fetches relevant chunks via API when querying
-
-### Disclaimer
-
-This tool is provided for educational and personal research purposes. Users are responsible for complying with YouTube's Terms of Service and applicable copyright laws. Always respect content creators by:
-- Linking back to original videos
-- Not redistributing transcripts or derivatives
-- Using this tool to enhance, not replace, watching original content
-
-If you're a content creator and have concerns about this tool, please open an issue.
+If you're a content creator and have concerns, please open an issue.
 
 ---
 
-*Built in Burlington, VT*
-
 This project is licensed under the MIT License (see `LICENSE`).
-

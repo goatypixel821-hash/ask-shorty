@@ -45,26 +45,27 @@ Transcript:
 
 # For OpenAI-compatible APIs: no tool-use, ask for raw JSON only.
 ENTITY_JSON_SYSTEM_PROMPT = """You extract structured entities from video transcripts.
+You MUST respond with ONLY a valid JSON array. No prose, no markdown, no explanation, no code fences.
 
-Respond with ONLY a valid JSON array of objects. No markdown, no code fences, no explanation.
-Each object must have:
+Each object in the array has exactly three keys:
 - "name": string (canonical name)
-- "type": string (one of: person, organization, system, protocol, software, location, concept, or product)
-- "aliases": array of strings (alternate names, abbreviations; can be empty [])
+- "type": string (one of: person, organization, system, protocol, software, location, concept, product)
+- "aliases": array of strings (alternate names; can be empty [])
 
-Requirements:
-- Prefer specific, concrete entities important to understanding the video.
-- Merge clear aliases into the same entity.
-- Be generous: include people, organizations, products, software, protocols, locations, important concepts.
-"""
+Rules:
+- Prefer specific, concrete entities important to the video.
+- Merge clear aliases into one entity.
+- Include people, organizations, products, software, protocols, locations, concepts.
+- Output MUST start with [ and end with ]. Nothing else."""
 
-ENTITY_JSON_USER_TEMPLATE = """Extract entities from this transcript. Reply with only a JSON array.
+ENTITY_JSON_USER_TEMPLATE = """Extract entities from this transcript.
 
 Title: {title}
 
-Transcript:
+Transcript (excerpt):
 {transcript}
-"""
+
+IMPORTANT: Your entire response must be a JSON array starting with [ and ending with ]. No other text."""
 
 
 def _normalize_type(raw_type: str) -> Optional[str]:
