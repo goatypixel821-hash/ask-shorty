@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,21 @@ def save_cached_triples(path: Path, triples: List[Dict[str, Any]]) -> None:
         json.dump(triples, f, ensure_ascii=False, indent=2)
 
 
+def _triple_fields_from_dict(item: Dict[str, Any]) -> Optional[tuple]:
+    """Accept subject/relation/object with case-insensitive keys; relation alias 'predicate'."""
+    if not isinstance(item, dict):
+        return None
+    norm = {str(k).lower().strip(): v for k, v in item.items() if isinstance(k, str)}
+    sub = norm.get("subject") or norm.get("subj")
+    rel = norm.get("relation") or norm.get("rel") or norm.get("predicate")
+    obj = norm.get("object") or norm.get("obj")
+    if isinstance(sub, str) and isinstance(rel, str) and isinstance(obj, str):
+        s, r, o = sub.strip(), rel.strip(), obj.strip()
+        if s and r and o:
+            return s, r, o
+    return None
+
+
 def parse_triples_json(raw: str) -> List[Dict[str, Any]]:
     if not raw or not raw.strip():
         return []
@@ -71,28 +86,46 @@ def parse_triples_json(raw: str) -> List[Dict[str, Any]]:
         m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if m:
             text = m.group(1).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+
+    blobs: List[str] = [text]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        inner = text[start : end + 1]
+        if inner not in blobs:
+            blobs.append(inner)
+
+    data: Any = None
+    for blob in blobs:
+        try:
+            data = json.loads(blob)
+            break
+        except json.JSONDecodeError:
+            continue
+    if data is None:
         return []
     if not isinstance(data, list):
         return []
+
     out: List[Dict[str, Any]] = []
     for item in data:
-        if not isinstance(item, dict):
-            continue
-        sub = item.get("subject")
-        rel = item.get("relation")
-        obj = item.get("object")
-        if isinstance(sub, str) and isinstance(rel, str) and isinstance(obj, str):
-            out.append(
-                {
-                    "subject": sub.strip(),
-                    "relation": rel.strip(),
-                    "object": obj.strip(),
-                    "confidence": float(item.get("confidence", 1.0) or 1.0),
-                }
-            )
+        if isinstance(item, dict):
+            triple = _triple_fields_from_dict(item)
+            if triple:
+                s, r, o = triple
+                conf = item.get("confidence", 1.0)
+                try:
+                    c = float(conf if conf is not None else 1.0)
+                except (TypeError, ValueError):
+                    c = 1.0
+                out.append(
+                    {
+                        "subject": s,
+                        "relation": r,
+                        "object": o,
+                        "confidence": c,
+                    }
+                )
     return out
 
 
@@ -149,6 +182,19 @@ def extract_triples_openai(
     chat_fn,
 ) -> List[Dict[str, Any]]:
     """chat_fn(system_prompt, user_prompt) -> raw string (OpenAI-compatible)."""
+    triples, _raw = extract_triples_openai_raw(shorty_text, title, chat_fn)
+    return triples
+
+
+def extract_triples_openai_raw(
+    shorty_text: str,
+    title: str,
+    chat_fn,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Same as extract_triples_openai but returns (triples, raw_llm_string) for debugging.
+    chat_fn(system_prompt, user_prompt) -> raw string (OpenAI-compatible).
+    """
     user = TRIPLE_USER_TEMPLATE.format(title=title or "Untitled", shorty=shorty_text.strip())
     raw = chat_fn(TRIPLE_SYSTEM_PROMPT.strip(), user)
-    return parse_triples_json(raw)
+    return parse_triples_json(raw), raw if isinstance(raw, str) else str(raw)

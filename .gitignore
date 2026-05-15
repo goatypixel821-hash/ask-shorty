@@ -53,3 +53,6 @@ youtube/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ── in-repo experiment sandbox (never push to ask-shorty) ───────────────────
+shorty-experiment/

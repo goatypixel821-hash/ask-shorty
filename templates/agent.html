@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ask Shorty — Agent</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --bg: #0c0f14;
+      --surface: #141922;
+      --border: #2a3140;
+      --text: #e8eaed;
+      --muted: #8b949e;
+      --accent: #3b82f6;
+      --user-bg: #1e3a5f;
+      --asst-bg: #1a1f2e;
+      --live: #64748b;
+      --pill-bg: rgba(59, 130, 246, 0.12);
+      --pill-br: rgba(59, 130, 246, 0.35);
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-width: 820px;
+      margin: 0 auto;
+    }
+    .topbar {
+      flex-shrink: 0;
+      padding: 10px 16px 8px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(12, 15, 20, 0.92);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .topbar h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .topbar .sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-left: auto;
+    }
+    .agent-banner {
+      flex-shrink: 0;
+      margin: 0 12px 8px;
+      font-size: 12px;
+      color: #fcd34d;
+      background: rgba(251, 191, 36, 0.06);
+      border: 1px solid rgba(251, 191, 36, 0.25);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    #chat-thread {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 14px 120px;
+      scroll-behavior: smooth;
+    }
+    .msg-row {
+      display: flex;
+      margin-bottom: 16px;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .msg-row--user { justify-content: flex-end; }
+    .msg-row--assistant { justify-content: flex-start; }
+    .msg-bubble {
+      max-width: 92%;
+      border-radius: 16px;
+      padding: 12px 14px;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .msg-bubble--user {
+      background: var(--user-bg);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+      border-bottom-right-radius: 4px;
+      white-space: pre-wrap;
+    }
+    .msg-bubble--assistant {
+      background: var(--asst-bg);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .live-stack {
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: var(--live);
+      line-height: 1.65;
+    }
+    .live-stack:empty { display: none; }
+    .live-line {
+      padding: 3px 0;
+      padding-left: 2px;
+      border-left: 2px solid rgba(100, 116, 139, 0.4);
+      margin-bottom: 4px;
+      padding-left: 8px;
+    }
+    .live-line--thinking {
+      color: #94a3b8;
+      font-style: italic;
+      border-left-color: rgba(148, 163, 184, 0.25);
+    }
+    .md-content {
+      word-wrap: break-word;
+    }
+    .md-content h1, .md-content h2, .md-content h3 {
+      margin: 0.6em 0 0.35em;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .md-content h1 { font-size: 1.25em; }
+    .md-content h2 { font-size: 1.12em; }
+    .md-content h3 { font-size: 1.05em; }
+    .md-content p { margin: 0.45em 0; }
+    .md-content p:first-child { margin-top: 0; }
+    .md-content p:last-child { margin-bottom: 0; }
+    .md-content ul, .md-content ol {
+      margin: 0.4em 0;
+      padding-left: 1.35em;
+    }
+    .md-content li { margin: 0.2em 0; }
+    .md-content code {
+      font-family: ui-monospace, monospace;
+      font-size: 0.9em;
+      background: rgba(0,0,0,0.35);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .md-content pre {
+      background: #0a0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+    .md-content pre code {
+      background: none;
+      padding: 0;
+    }
+    .md-content strong { font-weight: 600; }
+    .ref-line {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #64748b;
+    }
+    .sources-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .src-pill {
+      font-size: 11px;
+      color: #cbd5e1;
+      background: var(--pill-bg);
+      border: 1px solid var(--pill-br);
+      border-radius: 999px;
+      padding: 4px 10px;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .src-pill .vid { color: #94a3b8; font-family: ui-monospace, monospace; font-size: 10px; }
+    details.tool-trace {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    details.tool-trace summary {
+      cursor: pointer;
+      user-select: none;
+      color: #94a3b8;
+      padding: 4px 0;
+    }
+    details.tool-trace summary:hover { color: #cbd5e1; }
+    .tool-trace-inner {
+      margin-top: 6px;
+      padding: 8px 10px;
+      background: #0a0d12;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      color: #94a3b8;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .tool-trace-inner .tt-line { margin: 3px 0; white-space: pre-wrap; }
+
+    .composer-wrap {
+      flex-shrink: 0;
+      background: var(--bg);
+      padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0));
+      border-top: 1px solid var(--border);
+    }
+    .filter-toggle {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      text-decoration: none;
+      margin-bottom: 8px;
+      cursor: pointer;
+    }
+    .filter-toggle:hover { color: #cbd5e1; text-decoration: underline; }
+    #video-filter-panel {
+      display: none;
+      margin-bottom: 8px;
+    }
+    #video-filter-panel.is-open { display: block; }
+    #video-filter {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+    }
+    .composer {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 8px 10px;
+    }
+    #question {
+      flex: 1;
+      min-height: 44px;
+      max-height: 160px;
+      resize: none;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+      font-family: inherit;
+      padding: 6px 4px;
+    }
+    #question:focus { outline: none; }
+    #stop-btn {
+      flex-shrink: 0;
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(248, 113, 113, 0.45);
+      background: rgba(248, 113, 113, 0.1);
+      color: #fca5a5;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    #stop-btn:hover {
+      background: rgba(248, 113, 113, 0.18);
+      color: #fecaca;
+    }
+    #ask-btn {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      border: none;
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+    }
+    #ask-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .composer-hint {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 6px;
+      padding-left: 4px;
+    }
+    #error {
+      display: none;
+      color: var(--error);
+      font-size: 13px;
+      margin-bottom: 8px;
+      padding: 8px 10px;
+      background: rgba(248, 113, 113, 0.08);
+      border-radius: 8px;
+      border: 1px solid rgba(248, 113, 113, 0.25);
+    }
+
+    /* Collapsible pipeline debug (optional) */
+    .debug-wrap { margin-top: 10px; padding: 0 14px 12px; }
+    .debug-toggle-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    .debug-toggle-btn:hover { color: #cbd5e1; }
+    .debug-panel { margin-top: 6px; display: none; }
+    .debug-log {
+      background: #0a0d12;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      max-height: 200px;
+      overflow-y: auto;
+      color: #64748b;
+      line-height: 1.5;
+    }
+    .de-ts { color: #475569; margin-right: 6px; }
+    .de-step { color: #34d399; }
+    .de-rewrite { color: #60a5fa; }
+    .de-chunk { color: #f59e0b; }
+    .de-shorty { color: #a78bfa; }
+    .de-synq { color: #38bdf8; }
+    .de-context { color: #fb923c; }
+    .de-done { color: #4ade80; font-weight: 600; }
+    .de-err { color: #f87171; }
+    .de-dim { color: #475569; }
+    .de-sub { color: #64748b; margin-left: 12px; display: block; }
+    .de-preview { color: #475569; margin-left: 20px; font-style: italic; display: block; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1>Agent</h1>
+      <span class="sub">Claude + tools on your library</span>
+    </header>
+    {% if not agent_sse %}
+    <div class="agent-banner">Set <strong>ASK_SHORTY_AGENT=true</strong> on the server to stream tool steps live in this chat.</div>
+    {% endif %}
+
+    <div id="chat-thread" aria-live="polite"></div>
+
+    <div class="debug-wrap" id="debug-wrap" style="display:none;">
+      <button type="button" class="debug-toggle-btn" id="debug-toggle-btn">▶ Pipeline debug</button>
+      <div class="debug-panel" id="debug-panel">
+        <div class="debug-log" id="debug-log"></div>
+      </div>
+    </div>
+
+    <div class="composer-wrap">
+      <div id="error"></div>
+      <a href="#" class="filter-toggle" id="filter-toggle" role="button">Filter by video IDs</a>
+      <div id="video-filter-panel">
+        <input id="video-filter" type="text" placeholder="Comma-separated video IDs (optional)" autocomplete="off" />
+      </div>
+      <div class="composer">
+        <textarea id="question" rows="1" placeholder="Message…"></textarea>
+        <button type="button" id="stop-btn" title="Stop" aria-label="Stop">Stop</button>
+        <button type="button" id="ask-btn" title="Send" aria-label="Send">↵</button>
+      </div>
+      <div class="composer-hint">Enter to send · Shift+Enter for new line</div>
+    </div>
+  </div>
+
+  <script>
+    const AGENT_SSE = {{ agent_sse | tojson }};
+    const chatThread = document.getElementById("chat-thread");
+    const askBtn = document.getElementById("ask-btn");
+    const stopBtn = document.getElementById("stop-btn");
+    const qEl = document.getElementById("question");
+    const vidEl = document.getElementById("video-filter");
+    const errEl = document.getElementById("error");
+    const filterToggle = document.getElementById("filter-toggle");
+    const filterPanel = document.getElementById("video-filter-panel");
+    const debugWrap = document.getElementById("debug-wrap");
+    const debugPanel = document.getElementById("debug-panel");
+    const debugToggleBtn = document.getElementById("debug-toggle-btn");
+    const debugLog = document.getElementById("debug-log");
+
+    let _es = null;
+    let _debugOpen = false;
+    let _currentLiveStack = null;
+    let _thinkingTimer = null;
+    let _lastToolAt = 0;
+    let _pollHalted = false;
+    let _activeAgentJobId = null;
+    let _stopBubble = null;
+    let _chatHistory = [];  // {role, content} pairs for follow-up context
+
+    function hideStop() {
+      stopBtn.style.display = "none";
+      _activeAgentJobId = null;
+      _stopBubble = null;
+    }
+
+    function showStop(jobId, bubble) {
+      _activeAgentJobId = jobId;
+      _stopBubble = bubble;
+      stopBtn.style.display = "flex";
+    }
+
+    stopBtn.addEventListener("click", async () => {
+      const jid = _activeAgentJobId;
+      const bubble = _stopBubble;
+      if (!jid || !bubble) return;
+      _pollHalted = true;
+      if (_es) {
+        _es.close();
+        _es = null;
+      }
+      try {
+        await fetch(`/api/agent/job/${jid}`, { method: "DELETE" });
+      } catch (_) {}
+      hideStop();
+      askBtn.disabled = false;
+      clearLiveActivity(bubble);
+      _currentLiveStack = null;
+      const md = bubble.querySelector(".md-content");
+      md.style.display = "block";
+      md.innerHTML = "<p style='color:#94a3b8'>Cancelled</p>";
+      scrollThreadToBottom();
+    });
+
+    if (typeof marked !== "undefined") {
+      marked.setOptions({ breaks: true, gfm: true });
+    }
+
+    function esc(s) {
+      if (s == null) return "";
+      return String(s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function fmtMs(ms) {
+      if (ms == null) return "";
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    }
+
+    function fmtReasonPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(triple => esc(Array.isArray(triple) ? triple.join(" ") : String(triple))).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    function fmtGlobalPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(step => {
+          if (!Array.isArray(step) && !(step instanceof Array)) return esc(String(step));
+          const s = step[0], r = step[1], o = step[2], vid = step[3];
+          if (vid != null) return esc(`${s} ${r} ${o} [${vid}]`);
+          return esc(step.join(" "));
+        }).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    function scrollThreadToBottom() {
+      requestAnimationFrame(() => {
+        chatThread.scrollTop = chatThread.scrollHeight;
+      });
+    }
+
+    function showError(msg) {
+      errEl.textContent = msg || "";
+      errEl.style.display = msg ? "block" : "none";
+    }
+
+    function truncate(s, n) {
+      s = String(s || "");
+      return s.length <= n ? s : s.slice(0, n - 1) + "…";
+    }
+
+    function formatToolActivity(name, inp) {
+      inp = inp && typeof inp === "object" ? inp : {};
+      const q = (inp.query != null && String(inp.query)) || "";
+      const vid = (inp.video_id != null && String(inp.video_id)) || "";
+      const nm = (inp.name != null && String(inp.name)) || "";
+      const ch = (inp.channel_name != null && String(inp.channel_name)) || "";
+      const sd = (inp.start_date != null && String(inp.start_date)) || "";
+      const ed = (inp.end_date != null && String(inp.end_date)) || "";
+      const days = inp.days;
+      const typ = (inp.type != null && String(inp.type)) || "chunk";
+      const th = (inp.timestamp_hint != null && String(inp.timestamp_hint)) || "";
+
+      switch (name) {
+        case "search_vectors":
+          return "🔍 Searching vectors · " + typ + " · " + truncate(q, 80);
+        case "search_bm25":
+          return "🔎 BM25 search · " + truncate(q, 100);
+        case "get_shorty":
+          return "📄 Getting Shorty · " + truncate(vid, 40);
+        case "search_entities":
+          return "🏷️ Searching entities · " + truncate(nm, 80);
+        case "get_transcript_chunk":
+          return "✂️ Transcript chunk · " + truncate(vid, 24) + (th ? " · hint: " + truncate(th, 40) : "");
+        case "get_videos_by_channel":
+          return "📺 Channel videos · " + truncate(ch, 60);
+        case "get_videos_by_channel_with_shorties":
+          return "📺 Channel (with Shorties) · " + truncate(ch, 56);
+        case "get_videos_by_date":
+          return "📅 Videos by date · " + truncate(sd, 12) + " … " + truncate(ed, 12) + (ch ? " · " + truncate(ch, 40) : "");
+        case "get_recent_videos":
+          return "📅 Recent videos · " + (days != null ? days + " days" : "30 days") + (ch ? " · " + truncate(ch, 40) : "");
+        default:
+          return "⚙️ " + esc(name || "tool");
+      }
+    }
+
+    function appendLiveLine(text, className) {
+      if (!_currentLiveStack) return;
+      const line = document.createElement("div");
+      line.className = "live-line" + (className ? " " + className : "");
+      line.textContent = text;
+      _currentLiveStack.appendChild(line);
+      scrollThreadToBottom();
+      _lastToolAt = Date.now();
+      clearThinkingPlaceholder();
+      scheduleThinkingPlaceholder();
+    }
+
+    let _thinkingEl = null;
+    function clearThinkingPlaceholder() {
+      if (_thinkingTimer) {
+        clearTimeout(_thinkingTimer);
+        _thinkingTimer = null;
+      }
+      if (_thinkingEl && _thinkingEl.parentNode) {
+        _thinkingEl.remove();
+        _thinkingEl = null;
+      }
+    }
+
+    function scheduleThinkingPlaceholder() {
+      if (!_currentLiveStack) return;
+      clearThinkingPlaceholder();
+      _thinkingTimer = setTimeout(() => {
+        if (!_currentLiveStack) return;
+        if (Date.now() - _lastToolAt < 1400) return;
+        _thinkingEl = document.createElement("div");
+        _thinkingEl.className = "live-line live-line--thinking";
+        _thinkingEl.textContent = "🧠 Thinking…";
+        _currentLiveStack.appendChild(_thinkingEl);
+        scrollThreadToBottom();
+      }, 1600);
+    }
+
+    function appendDebug(html) {
+      const div = document.createElement("div");
+      div.innerHTML = html;
+      debugLog.appendChild(div);
+      debugLog.scrollTop = debugLog.scrollHeight;
+    }
+
+    function toggleDebug() {
+      _debugOpen = !_debugOpen;
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " Pipeline debug";
+    }
+
+    function handleDebugEvent(ev) {
+      const ts = ev.elapsed_ms != null
+        ? `<span class="de-ts">[${fmtMs(ev.elapsed_ms)}]</span>`
+        : "";
+
+      switch (ev.type) {
+        case "step":
+          appendDebug(`${ts}<span class="de-step">✓ ${esc(ev.label)}</span>`);
+          break;
+        case "rewrites": {
+          let h = `${ts}<span class="de-rewrite">◆ query rewrites</span>`;
+          h += `<span class="de-sub">original: ${esc(ev.original)}</span>`;
+          (ev.variants || []).forEach((v, i) => {
+            h += `<span class="de-sub">variant ${i+1}: ${esc(v)}</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+        case "fusion": {
+          let h = `${ts}<span class="de-rewrite">◇ RRF fusion</span>`;
+          h += `<span class="de-sub">bm25_hits=${esc(ev.bm25_hits)} graph_hits=${esc(ev.graph_hits)}</span>`;
+          appendDebug(h);
+          break;
+        }
+        case "hsc": {
+          let h = `${ts}<span class="de-rewrite">◇ HSC</span>`;
+          h += `<span class="de-sub">type=${esc(ev.query_type)}</span>`;
+          appendDebug(h);
+          break;
+        }
+        case "hits": {
+          const cls = { chunk: "de-chunk", shorty: "de-shorty", synq: "de-synq" }[ev.layer] || "de-step";
+          let h = `${ts}<span class="${cls}">▸ ${esc(ev.layer)} — ${ev.count} hit(s)</span>`;
+          appendDebug(h);
+          break;
+        }
+        case "context": {
+          let h = `${ts}<span class="de-context">■ context → LLM: ${ev.count} block(s)</span>`;
+          appendDebug(h);
+          break;
+        }
+        case "done":
+          appendDebug(`${ts}<span class="de-done">✔ done ${fmtMs(ev.total_elapsed_ms)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+        case "error":
+          appendDebug(`${ts}<span class="de-err">✗ ${esc(ev.message)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+        case "stream_end":
+          if (_es) { _es.close(); _es = null; }
+          break;
+        case "keepalive":
+          break;
+        case "agent_tool": {
+          const nm = ev.name || (ev.label || "").replace(/^\[agent\]\s*/, "").split(":")[0] || "tool";
+          const inp = ev.input || {};
+          appendLiveLine(formatToolActivity(nm, inp));
+          break;
+        }
+      }
+    }
+
+    function startDebugStream(jobId) {
+      if (_es) { _es.close(); _es = null; }
+      debugLog.innerHTML = "";
+      debugWrap.style.display = "block";
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " Pipeline debug";
+
+      _es = new EventSource(`/api/agent/stream/${jobId}`);
+      _es.onmessage = (e) => {
+        try { handleDebugEvent(JSON.parse(e.data)); } catch (_) {}
+      };
+      _es.onerror = () => {
+        appendDebug(`<span class="de-err">stream connection lost</span>`);
+        _es.close(); _es = null;
+      };
+    }
+
+    function renderMarkdown(text) {
+      const raw = text || "";
+      if (typeof marked !== "undefined" && marked.parse) {
+        try {
+          return marked.parse(raw);
+        } catch (_) {
+          return "<p>" + esc(raw) + "</p>";
+        }
+      }
+      return "<p>" + esc(raw).replace(/\n/g, "<br/>") + "</p>";
+    }
+
+    function clearLiveActivity(bubbleEl) {
+      clearThinkingPlaceholder();
+      const ls = bubbleEl && bubbleEl.querySelector(".live-stack");
+      if (ls) ls.innerHTML = "";
+    }
+
+    function finalizeAssistantBubble(bubbleEl, body) {
+      const liveStack = bubbleEl.querySelector(".live-stack");
+      const mdEl = bubbleEl.querySelector(".md-content");
+      const refEl = bubbleEl.querySelector(".ref-line");
+      const sourcesRow = bubbleEl.querySelector(".sources-row");
+      const details = bubbleEl.querySelector("details.tool-trace");
+      const traceInner = bubbleEl.querySelector(".tool-trace-inner");
+
+      clearThinkingPlaceholder();
+      _currentLiveStack = null;
+
+      mdEl.innerHTML = renderMarkdown(body.answer || "");
+      mdEl.style.display = "block";
+
+      if (body.ref_id) {
+        refEl.textContent = "Saved as " + body.ref_id;
+        refEl.style.display = "block";
+      }
+
+      sourcesRow.innerHTML = "";
+      const sources = body.sources || [];
+      sources.forEach(src => {
+        const pill = document.createElement("span");
+        pill.className = "src-pill";
+        pill.title = (src.title || "") + " — " + (src.video_id || "");
+        pill.appendChild(document.createTextNode(src.title || src.video_id || "?"));
+        if (src.channel) pill.appendChild(document.createTextNode(" · " + src.channel));
+        if (src.watch_date) {
+          pill.appendChild(document.createTextNode(" · " + String(src.watch_date).slice(0, 10)));
+        }
+        const vid = document.createElement("span");
+        vid.className = "vid";
+        vid.textContent = " " + (src.video_id || "");
+        pill.appendChild(vid);
+        sourcesRow.appendChild(pill);
+      });
+
+      const lines = liveStack ? Array.from(liveStack.querySelectorAll(".live-line")) : [];
+      if (traceInner && lines.length) {
+        lines.forEach(node => {
+          const copy = document.createElement("div");
+          copy.className = "tt-line";
+          copy.textContent = node.textContent || "";
+          traceInner.appendChild(copy);
+        });
+        details.style.display = "block";
+        const summary = details.querySelector("summary");
+        if (summary) summary.textContent = "Tool trace (" + lines.length + ")";
+      }
+      if (liveStack) liveStack.remove();
+
+      scrollThreadToBottom();
+    }
+
+    function createAssistantPlaceholder() {
+      const row = document.createElement("div");
+      row.className = "msg-row msg-row--assistant";
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble msg-bubble--assistant";
+      bubble.innerHTML =
+        '<div class="live-stack"></div>' +
+        '<div class="md-content" style="display:none"></div>' +
+        '<div class="ref-line" style="display:none"></div>' +
+        '<div class="sources-row"></div>' +
+        '<details class="tool-trace" style="display:none">' +
+        '<summary>Tool trace</summary>' +
+        '<div class="tool-trace-inner"></div>' +
+        "</details>";
+      row.appendChild(bubble);
+      chatThread.appendChild(row);
+      _currentLiveStack = bubble.querySelector(".live-stack");
+      _lastToolAt = Date.now();
+      scheduleThinkingPlaceholder();
+      scrollThreadToBottom();
+      return bubble;
+    }
+
+    function appendUserBubble(text) {
+      const row = document.createElement("div");
+      row.className = "msg-row msg-row--user";
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble msg-bubble--user";
+      bubble.textContent = text;
+      row.appendChild(bubble);
+      chatThread.appendChild(row);
+      scrollThreadToBottom();
+    }
+
+    async function doAsk() {
+      const q = qEl.value.trim();
+      const rawVideos = (vidEl && vidEl.value.trim()) || "";
+      showError("");
+      if (!q) {
+        showError("Please enter a message.");
+        return;
+      }
+
+      appendUserBubble(q);
+      qEl.value = "";
+      qEl.style.height = "auto";
+
+      const assistantBubble = createAssistantPlaceholder();
+
+      _pollHalted = false;
+      askBtn.disabled = true;
+      _lastToolAt = Date.now();
+
+      try {
+        let video_ids = null;
+        if (rawVideos) {
+          video_ids = rawVideos.split(",").map(v => v.trim()).filter(Boolean);
+        }
+
+        _chatHistory.push({ role: "user", content: q });
+
+        const resp = await fetch("/api/agent/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: q,
+            video_ids,
+            history: _chatHistory.slice(0, -1)
+          })
+        });
+        let data = null;
+        try {
+          data = await resp.json();
+        } catch (jsonErr) {
+          throw new Error("Failed to parse server response from /api/agent/ask");
+        }
+        if (!resp.ok || !data.success) {
+          throw new Error(data.error || "Failed to start agent job.");
+        }
+
+        const jobId = data.job_id;
+        showStop(jobId, assistantBubble);
+        if (AGENT_SSE) startDebugStream(jobId);
+        else {
+          debugWrap.style.display = "block";
+          appendDebug(`<span class="de-step">✓ job #${esc(jobId)} (enable ASK_SHORTY_AGENT for live tool lines)</span>`);
+        }
+
+        const maxMs = 300000;
+        const intervalMs = 2000;
+
+        async function pollOnce(elapsedMs) {
+          if (_pollHalted) return;
+          if (elapsedMs >= maxMs) {
+            clearLiveActivity(assistantBubble);
+            _currentLiveStack = null;
+            hideStop();
+            showError("Timed out waiting for the agent. Please try again.");
+            askBtn.disabled = false;
+            const md = assistantBubble.querySelector(".md-content");
+            md.style.display = "block";
+            md.textContent = "(Timed out.)";
+            return;
+          }
+
+          try {
+            const r = await fetch(`/api/agent/result/${jobId}`);
+            let body = null;
+            try {
+              body = await r.json();
+            } catch (jsonErr) {
+              throw new Error("Failed to parse /api/agent/result");
+            }
+
+            if (!r.ok) {
+              throw new Error(body.error || "Error fetching result.");
+            }
+
+            if (body.status === "cancelled") {
+              clearLiveActivity(assistantBubble);
+              _currentLiveStack = null;
+              hideStop();
+              askBtn.disabled = false;
+              const md = assistantBubble.querySelector(".md-content");
+              md.style.display = "block";
+              md.innerHTML = "<p style='color:#94a3b8'>Cancelled</p>";
+              scrollThreadToBottom();
+              return;
+            }
+
+            if (body.status === "pending" || body.status === "running") {
+              if (_pollHalted) return;
+              scheduleThinkingPlaceholder();
+              setTimeout(() => pollOnce(elapsedMs + intervalMs), intervalMs);
+              return;
+            }
+
+            if (body.status === "error" || !body.success) {
+              clearLiveActivity(assistantBubble);
+              _currentLiveStack = null;
+              hideStop();
+              const errMsg = body.error || "Process crashed - please retry";
+              if ((body.error || "").toLowerCase() !== "timeout") {
+                showError(errMsg);
+              } else {
+                showError("");
+              }
+              askBtn.disabled = false;
+              const md = assistantBubble.querySelector(".md-content");
+              md.style.display = "block";
+              const isTimeout = (body.error || "").toLowerCase() === "timeout";
+              md.innerHTML = isTimeout
+                ? "<p style='color:#fbbf24'>Timed out (server).</p>"
+                : "<p style='color:#f87171'>" + esc(errMsg) + "</p>";
+              scrollThreadToBottom();
+              return;
+            }
+
+            hideStop();
+            finalizeAssistantBubble(assistantBubble, body);
+            if (body.answer) {
+              _chatHistory.push({ role: "assistant", content: body.answer });
+            }
+            askBtn.disabled = false;
+          } catch (err) {
+            clearLiveActivity(assistantBubble);
+            _currentLiveStack = null;
+            hideStop();
+            showError(err.message || String(err));
+            askBtn.disabled = false;
+            const md = assistantBubble.querySelector(".md-content");
+            md.style.display = "block";
+            md.innerHTML = "<p style='color:#f87171'>" + esc(err.message || String(err)) + "</p>";
+            scrollThreadToBottom();
+          }
+        }
+
+        pollOnce(0);
+      } catch (e) {
+        if (_chatHistory.length && _chatHistory[_chatHistory.length - 1].role === "user") {
+          _chatHistory.pop();
+        }
+        clearLiveActivity(assistantBubble);
+        _currentLiveStack = null;
+        hideStop();
+        showError(e.message || String(e));
+        askBtn.disabled = false;
+        const md = assistantBubble.querySelector(".md-content");
+        md.style.display = "block";
+        md.innerHTML = "<p style='color:#f87171'>" + esc(e.message || String(e)) + "</p>";
+        scrollThreadToBottom();
+      }
+    }
+
+    filterToggle.addEventListener("click", (e) => {
+      e.preventDefault();
+      filterPanel.classList.toggle("is-open");
+    });
+
+    debugToggleBtn.addEventListener("click", toggleDebug);
+
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const pq = params.get("q");
+      const pv = params.get("video_ids");
+      if (pq) qEl.value = pq;
+      if (pv) {
+        vidEl.value = pv;
+        filterPanel.classList.add("is-open");
+      }
+    })();
+
+    qEl.addEventListener("input", () => {
+      qEl.style.height = "auto";
+      qEl.style.height = Math.min(qEl.scrollHeight, 160) + "px";
+    });
+
+    qEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        if (!askBtn.disabled) doAsk();
+      }
+    });
+
+    askBtn.addEventListener("click", () => {
+      if (!askBtn.disabled) doAsk();
+    });
+  </script>
+</body>
+</html>

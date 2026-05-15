@@ -2,6 +2,10 @@
 """
 Rigorous evaluation framework for Ask Shorty RAG system.
 
+Retrieval configs include dense-only, dense+BM25 hybrid, and hybrid+graph
+(``chunk_bm25_graph``, ``full_bm25_graph``) — graph uses SQLite ``facts`` via
+``graph_search.GraphSearch``, fused with RRF like Ask with ``ASK_SHORTY_GRAPH=1``.
+
 Three pipeline modes are compared:
 
   baseline        - current pipeline: chunk+shorty+synq, video-level dedup, no reranking
@@ -20,6 +24,15 @@ Outputs:
   eval_results/<timestamp>/queries/            - one JSON artifact per query
                                                  showing top hits before/after reranking
   eval_results/eval_summary.csv                - latest run summary (overwritten each run)
+
+Focused runs:
+  python evaluate_rag.py --config chunk_only,chunk_shorty --mode baseline --no-answer
+  python evaluate_rag.py --per-layer-baseline --mode baseline --no-answer
+    (adds a summary block: each Chroma ``type`` queried alone — shows Shorty vs chunk
+    even when fused ``chunk_shorty`` matches ``chunk_only`` after video dedup.)
+
+  python evaluate_rag.py --config v2_hierarchical --queries-dir eval_results/20260514_065902/queries/replacements
+    (load one JSON per query from a directory — e.g. title-free tr_* replacements)
 """
 
 from __future__ import annotations
@@ -33,6 +46,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+def _load_shorty_dotenv() -> None:
+    """Load ``shorty/.env`` so ASK_SHORTY_* vars apply (optional: pip install python-dotenv)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=True)
+
+
+_load_shorty_dotenv()
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -44,9 +71,16 @@ CONFIGS    = [
     "full_system",
     "chunk_bm25",
     "full_bm25",
+    # Same as above + SQLite facts (triples) via GraphSearch, fused with RRF — mirrors Ask with ASK_SHORTY_GRAPH=1
+    "chunk_bm25_graph",
+    "full_bm25_graph",
+    # Ask Shorty V2: hierarchical BM25 (+ rerank), no Chroma — compare to full_bm25 R@5 baseline
+    "v2_hierarchical",
 ]
 CATEGORIES = ["specific_fact", "thematic", "cross_video", "causal_chain"]
 EVAL_MODES = ["baseline", "rerank_isolated", "rerank_grouped", "rerank_grouped_expanded"]
+# Dense Chroma metadata types (per-layer eval uses each alone, same flatten as baseline)
+PER_LAYER_TYPES = ["chunk", "shorty", "synthetic_question"]
 # rerank_grouped          = group + rerank, no neighbour expansion (just matched chunk)
 # rerank_grouped_expanded = group + rerank + expand prev/next chunks for context
 
@@ -62,6 +96,54 @@ ANSWER_SYSTEM = (
 # ---------------------------------------------------------------------------
 # Query loading
 # ---------------------------------------------------------------------------
+
+def normalize_query_record(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise field names from eval artifacts / local-dataset formats."""
+    out = dict(r)
+    if "id" not in out and "query_id" in out:
+        out["id"] = out["query_id"]
+    if "relevant_video_ids" not in out and "expected_video_ids" in out:
+        out["relevant_video_ids"] = out["expected_video_ids"]
+    if "category" not in out and "query_type" in out:
+        out["category"] = {
+            "fact_lookup": "specific_fact",
+            "entity_topic": "thematic",
+            "summary_comparison": "cross_video",
+            "paraphrase": "specific_fact",
+            "tricky": "specific_fact",
+        }.get(out["query_type"], out["query_type"])
+    return out
+
+
+def _resolve_queries_dir(path: Path) -> Path:
+    """
+    Accept an eval run root (…/20260514_065902), queries folder, or replacements/.
+    """
+    path = path.resolve()
+    if path.is_dir() and path.name != "queries" and (path / "queries").is_dir():
+        return path / "queries"
+    return path
+
+
+def load_queries_from_dir(dir_path: str) -> List[Dict[str, Any]]:
+    """Load one query dict per ``*.json`` file in a directory (non-recursive)."""
+    root = _resolve_queries_dir(Path(dir_path))
+    if not root.is_dir():
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for fp in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  [WARN] skip {fp.name}: {exc}")
+            continue
+        if not isinstance(data, dict):
+            print(f"  [WARN] skip {fp.name}: expected JSON object")
+            continue
+        records.append(normalize_query_record(data))
+    return records
+
 
 def load_queries(path: str) -> List[Dict[str, Any]]:
     """
@@ -82,31 +164,12 @@ def load_queries(path: str) -> List[Dict[str, Any]]:
                         records.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-        return records
+        return [normalize_query_record(r) for r in records]
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     records = data if isinstance(data, list) else data.get("queries", [])
-
-    # Normalise field names from the newer local-dataset format
-    for r in records:
-        # query_id → id
-        if "id" not in r and "query_id" in r:
-            r["id"] = r["query_id"]
-        # expected_video_ids → relevant_video_ids
-        if "relevant_video_ids" not in r and "expected_video_ids" in r:
-            r["relevant_video_ids"] = r["expected_video_ids"]
-        # query_type → category  (using the mapping from build_eval_dataset.py)
-        if "category" not in r and "query_type" in r:
-            r["category"] = {
-                "fact_lookup":          "specific_fact",
-                "entity_topic":         "thematic",
-                "summary_comparison":   "cross_video",
-                "paraphrase":           "specific_fact",
-                "tricky":               "specific_fact",
-            }.get(r["query_type"], r["query_type"])
-
-    return records
+    return [normalize_query_record(r) for r in records]
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +182,66 @@ def get_rag(db_path: str, chroma_path: Optional[str] = None):
     if chroma_path:
         kwargs["chroma_dir"] = chroma_path
     return TranscriptRAG(**kwargs)
+
+
+# Default Chroma for eval when --chroma-path is omitted (matches Ask Shorty corpus layout).
+_DEFAULT_EVAL_CHROMA = Path(
+    r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcript_chroma_new"
+)
+
+
+def _resolve_eval_chroma_path(db_path: Path, chroma_arg: Optional[str]) -> Optional[Path]:
+    """
+    Resolve Chroma directory for evaluate_rag.
+
+    Order (same spirit as --db-path + find_best_db):
+    1. Explicit ``--chroma-path`` if it exists as a directory
+    2. ``ASK_SHORTY_CHROMA_PATH`` environment variable if it points to a directory
+    3. Hardcoded viewer Chroma path if that directory exists
+    4. ``find_companion_chroma(db, None)`` — sibling ``transcript_chroma_new`` /
+       ``transcript_chroma`` next to the resolved DB
+    """
+    if chroma_arg:
+        p = Path(chroma_arg)
+        if p.is_dir():
+            return p
+        print(f"  [WARN] --chroma-path is not a directory (skipping): {p}")
+
+    env = (os.environ.get("ASK_SHORTY_CHROMA_PATH") or "").strip()
+    if env:
+        p = Path(env)
+        if p.is_dir():
+            return p
+        print(f"  [WARN] ASK_SHORTY_CHROMA_PATH is not a directory (skipping): {p}")
+
+    if _DEFAULT_EVAL_CHROMA.is_dir():
+        return _DEFAULT_EVAL_CHROMA
+
+    from build_eval_dataset import find_companion_chroma
+
+    return find_companion_chroma(db_path, None)
+
+
+def parse_config_list(config_arg: str, skip_graph: bool) -> List[str]:
+    """
+    ``all`` → full CONFIGS list (optionally minus *_graph when skip_graph).
+    Comma-separated names → that subset, validated against CONFIGS.
+    Single name → one-element list.
+    """
+    if config_arg == "all":
+        out = list(CONFIGS)
+        if skip_graph:
+            out = [c for c in out if not _config_uses_graph(c)]
+        # V2 needs populate_v2_indexes + BM25 pickles — opt-in only (explicit --config v2_hierarchical).
+        out = [c for c in out if c != "v2_hierarchical"]
+        return out
+    parts = [p.strip() for p in config_arg.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("empty --config")
+    bad = [p for p in parts if p not in CONFIGS]
+    if bad:
+        raise ValueError(f"unknown config(s): {bad!r}; allowed: {CONFIGS}")
+    return parts
 
 
 def detect_chroma_format(rag) -> bool:
@@ -143,9 +266,16 @@ def _query_chroma(
     source_type: str,
     n: int,
     chroma_has_type: bool = True,
+    embed_fn=None,
 ) -> List[Tuple[str, float, Dict, str]]:
     """
     Returns list of (source_id, score, metadata, text) for one type filter.
+
+    embed_fn: optional callable(List[str]) -> List[List[float]].  When provided,
+    the query is embedded locally (using the same model that built the index) and
+    passed as query_embeddings.  This is required when the index was built with a
+    non-default / fine-tuned model so that query and stored vectors are in the
+    same embedding space.  Falls back to query_texts (Chroma default) when None.
 
     When chroma_has_type=False (old index format without 'type' metadata) the
     filter is omitted and all document types are returned together for 'chunk'
@@ -161,11 +291,19 @@ def _query_chroma(
         where_filter = {"type": source_type}
 
     try:
-        res = collection.query(
-            query_texts=[query],
-            n_results=n,
-            where=where_filter,
-        )
+        if embed_fn is not None:
+            query_emb = embed_fn([query])
+            res = collection.query(
+                query_embeddings=query_emb,
+                n_results=n,
+                where=where_filter,
+            )
+        else:
+            res = collection.query(
+                query_texts=[query],
+                n_results=n,
+                where=where_filter,
+            )
     except Exception:
         return []
     ids    = (res.get("ids")       or [[]])[0]
@@ -189,26 +327,39 @@ def _query_chroma(
 
 
 def _types_for_config(config: str) -> List[str]:
-    if config in ("chunk_bm25", "chunk_only"):
+    if config in ("chunk_bm25", "chunk_only", "chunk_bm25_graph"):
         return ["chunk"]
     if config == "chunk_shorty":
         return ["chunk", "shorty"]
     if config == "chunk_synq":
         return ["chunk", "synthetic_question"]
-    if config in ("full_bm25", "full_system"):
+    if config in ("full_bm25", "full_system", "full_bm25_graph"):
         return ["chunk", "shorty", "synthetic_question"]
     return ["chunk", "shorty", "synthetic_question"]
 
 
 def _config_uses_bm25(config: str) -> bool:
-    return config in ("chunk_bm25", "full_bm25")
+    return config in (
+        "chunk_bm25",
+        "full_bm25",
+        "chunk_bm25_graph",
+        "full_bm25_graph",
+    )
+
+
+def _config_uses_graph(config: str) -> bool:
+    return config in ("chunk_bm25_graph", "full_bm25_graph")
+
+
+def _config_is_v2(config: str) -> bool:
+    return config == "v2_hierarchical"
 
 
 def _strip_bm25_config(config: str) -> str:
     """Map hybrid eval configs to underlying Chroma-only config for rerank paths."""
-    if config == "chunk_bm25":
+    if config in ("chunk_bm25", "chunk_bm25_graph"):
         return "chunk_only"
-    if config == "full_bm25":
+    if config in ("full_bm25", "full_bm25_graph"):
         return "full_system"
     return config
 
@@ -284,6 +435,7 @@ def run_baseline_hybrid(
     config: str,
     n: int = TOP_K_RETRIEVAL,
     chroma_has_type: bool = True,
+    embed_fn=None,
 ) -> Tuple[List[str], List[Dict]]:
     """
     Vector layers per config + BM25 keyword search, merged with reciprocal rank fusion.
@@ -292,7 +444,7 @@ def run_baseline_hybrid(
 
     all_hits: List[Tuple[str, float, Dict, str]] = []
     for stype in _types_for_config(config):
-        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type))
+        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type, embed_fn))
 
     ranked = _flatten_to_video_list(all_hits)
     vector_rank = [v for v, _ in ranked]
@@ -316,12 +468,62 @@ def run_baseline_hybrid(
     return video_ids, artifact_hits
 
 
+def run_baseline_hybrid_graph(
+    rag,
+    bm25_search,
+    db_path: str,
+    query: str,
+    config: str,
+    n: int = TOP_K_RETRIEVAL,
+    chroma_has_type: bool = True,
+    embed_fn=None,
+) -> Tuple[List[str], List[Dict]]:
+    """
+    Vector (per-layer) + BM25 + GraphSearch(facts) merged with RRF — same three signals as
+    ask_shorty.py when ASK_SHORTY_BM25=1 and ASK_SHORTY_GRAPH=1 (no HSC).
+    """
+    from graph_search import GraphSearch
+    from bm25_index import reciprocal_rank_fusion
+
+    if not _config_uses_graph(config):
+        raise ValueError(f"run_baseline_hybrid_graph: not a graph config: {config}")
+
+    all_hits: List[Tuple[str, float, Dict, str]] = []
+    for stype in _types_for_config(config):
+        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type, embed_fn))
+
+    ranked = _flatten_to_video_list(all_hits)
+    vector_rank = [v for v, _ in ranked]
+
+    bm25_hits = bm25_search.search(query, top_k=n) if bm25_search is not None else []
+    bm25_rank = [h["video_id"] for h in bm25_hits]
+
+    graph_hits = GraphSearch(db_path).search(query, top_k=n)
+    graph_rank = [h["video_id"] for h in graph_hits]
+
+    fused = reciprocal_rank_fusion([vector_rank, bm25_rank, graph_rank], k=60)
+    video_ids = [v for v, _ in fused]
+
+    artifact_hits = [
+        {
+            "source_id": hits[0],
+            "score": round(hits[1], 4),
+            "video_id": (hits[2] or {}).get("video_id"),
+            "source_type": (hits[2] or {}).get("type"),
+            "text_snippet": (hits[3] or "")[:120],
+        }
+        for hits in sorted(all_hits, key=lambda h: h[1])[:15]
+    ]
+    return video_ids, artifact_hits
+
+
 def run_baseline(
     rag,
     query: str,
     config: str,
     n: int = TOP_K_RETRIEVAL,
     chroma_has_type: bool = True,
+    embed_fn=None,
 ) -> Tuple[List[str], List[Dict]]:
     """
     Current pipeline: retrieve from each layer, deduplicate by video_id,
@@ -331,7 +533,7 @@ def run_baseline(
     """
     all_hits: List[Tuple[str, float, Dict, str]] = []
     for stype in _types_for_config(config):
-        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type))
+        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type, embed_fn))
 
     ranked = _flatten_to_video_list(all_hits)
     video_ids = [v for v, _ in ranked]
@@ -357,6 +559,7 @@ def run_rerank_isolated(
     title_map: Dict[str, str],
     n: int = TOP_K_RETRIEVAL,
     chroma_has_type: bool = True,
+    embed_fn=None,
 ) -> Tuple[List[str], List[Dict], List[Dict]]:
     """
     Rerank each individual hit independently with the CrossEncoder.
@@ -366,7 +569,7 @@ def run_rerank_isolated(
 
     all_hits: List[Tuple[str, float, Dict, str]] = []
     for stype in _types_for_config(config):
-        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type))
+        all_hits.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type, embed_fn))
 
     if not all_hits:
         return [], [], []
@@ -425,18 +628,19 @@ def run_rerank_grouped(
     n: int = TOP_K_RETRIEVAL,
     chroma_has_type: bool = True,
     expand_neighbors: bool = False,
+    embed_fn=None,
 ) -> Tuple[List[str], List[Dict], List[Dict]]:
     """
     Full grouped reranking pipeline from reranker.py.
 
-    expand_neighbors=False  rerank_grouped          — just the matched chunk text
-    expand_neighbors=True   rerank_grouped_expanded — prev+chunk+next window
+    expand_neighbors=False  rerank_grouped          -- just the matched chunk text
+    expand_neighbors=True   rerank_grouped_expanded -- prev+chunk+next window
 
     Returns (video_ids_ranked, before_hits, after_groups).
     """
     all_hits_raw: List[Tuple[str, float, Dict, str]] = []
     for stype in _types_for_config(config):
-        all_hits_raw.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type))
+        all_hits_raw.extend(_query_chroma(rag.collection, query, stype, n, chroma_has_type, embed_fn))
 
     if not all_hits_raw:
         return [], [], []
@@ -674,21 +878,37 @@ def main() -> None:
         "--chroma-dir",
         dest="chroma_path",
         default=None,
-        help="Path to Chroma vector store directory.  Auto-detected if omitted.",
+        help=(
+            "Path to Chroma vector store. If omitted: ASK_SHORTY_CHROMA_PATH env, "
+            "then default viewer transcript_chroma_new, then sibling of --db-path."
+        ),
     )
     parser.add_argument(
         "--queries-file",
         default=str(Path(__file__).parent / "eval_data" / "final" / "golden.jsonl"),
         help=(
             "Path to eval queries file (.jsonl or .json).  "
-            "Default: eval_data/final/golden.jsonl"
+            "Default: eval_data/final/golden.jsonl. "
+            "Ignored when --queries-dir is set."
+        ),
+    )
+    parser.add_argument(
+        "--queries-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory of per-query JSON files (e.g. eval_results/<run>/queries or "
+            "…/queries/replacements). Overrides --queries-file."
         ),
     )
     parser.add_argument(
         "--config",
         default="all",
-        choices=["all"] + CONFIGS,
-        help="Which retrieval config to test",
+        metavar="NAME|all",
+        help=(
+            "One config, comma-separated list, or 'all'. "
+            "Examples: chunk_only | chunk_only,chunk_shorty,full_system | all"
+        ),
     )
     parser.add_argument(
         "--category",
@@ -715,19 +935,43 @@ def main() -> None:
         action="store_true",
         help="Skip answer generation (faster; only measures retrieval metrics)",
     )
+    parser.add_argument(
+        "--skip-graph",
+        action="store_true",
+        help="With --config all, omit chunk_bm25_graph and full_bm25_graph (faster old-style run).",
+    )
+    parser.add_argument(
+        "--per-layer-baseline",
+        action="store_true",
+        help=(
+            "With baseline mode, also score each Chroma type alone (chunk / shorty / "
+            "synthetic_question) after video-level dedup; shows layer strength even when "
+            "fused configs match chunk_only."
+        ),
+    )
     args = parser.parse_args()
 
-    queries = load_queries(args.queries_file)
+    if args.queries_dir:
+        queries_dir = _resolve_queries_dir(Path(args.queries_dir))
+        queries = load_queries_from_dir(str(queries_dir))
+        queries_source = str(queries_dir)
+    else:
+        queries = load_queries(args.queries_file)
+        queries_source = args.queries_file
+
     if not queries:
-        print(f"No queries found in {args.queries_file}")
+        print(f"No queries found in {queries_source}")
         print(
             "\nTo build the eval dataset, run:\n"
             "  python build_eval_dataset.py\n"
             "  python review_eval_dataset.py\n"
             "  python review_eval_dataset.py --finalize\n"
-            "\nOr pass a custom file with --queries-file path/to/queries.jsonl"
+            "\nOr pass --queries-file path/to/queries.jsonl\n"
+            "Or pass --queries-dir path/to/queries/  (one .json per query)"
         )
         return
+
+    print(f"Queries source : {queries_source}  ({len(queries)} queries)")
 
     if args.category != "all":
         queries = [q for q in queries if q.get("category") == args.category]
@@ -735,7 +979,11 @@ def main() -> None:
         print("No queries left after category filter.")
         return
 
-    configs = CONFIGS if args.config == "all" else [args.config]
+    try:
+        configs = parse_config_list(args.config, skip_graph=args.skip_graph)
+    except ValueError as exc:
+        print(f"Invalid --config: {exc}")
+        return
     modes   = EVAL_MODES if args.mode == "all" else [args.mode]
 
     # Create timestamped output directory for this run
@@ -746,9 +994,10 @@ def main() -> None:
     os.makedirs(artifact_dir, exist_ok=True)
 
     # Resolve DB and Chroma paths (use build_eval_dataset's auto-detect logic)
-    from build_eval_dataset import find_best_db, find_companion_chroma
-    db_path     = find_best_db(args.db_path)
-    chroma_path = find_companion_chroma(db_path, args.chroma_path)
+    from build_eval_dataset import find_best_db
+
+    db_path = find_best_db(args.db_path)
+    chroma_path = _resolve_eval_chroma_path(db_path, args.chroma_path)
 
     print(f"Using DB       : {db_path}  ({round(db_path.stat().st_size / 1e6, 1)} MB)")
     if chroma_path:
@@ -770,6 +1019,18 @@ def main() -> None:
             "         Shorty and synthetic-question layers will be skipped.\n"
             "         Run reindex_all.py to rebuild with type metadata for full multi-layer eval."
         )
+    if args.per_layer_baseline and not chroma_has_type:
+        print(
+            "  [WARN] --per-layer-baseline: shorty / synthetic_question layers will score as empty."
+        )
+
+    # Build embed_fn so all Chroma queries use the SAME model that built the index.
+    # Chroma's built-in query_texts uses its own default (all-MiniLM-L6-v2); if the
+    # index was built with a fine-tuned model the vectors are in a different space.
+    # Passing query_embeddings avoids this mismatch.
+    _em = rag.embedding_model
+    def embed_fn(texts):
+        return _em.encode(texts, show_progress_bar=False).tolist()
 
     # Lazy-load reranker only if needed
     reranker = None
@@ -788,10 +1049,29 @@ def main() -> None:
         bm25_search = BM25Search(str(default_bm25_index_path(str(db_path))))
         print(f"  BM25 index: {default_bm25_index_path(str(db_path))}")
 
+    if any(_config_uses_graph(c) for c in configs):
+        import sqlite3
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM facts")
+            n_facts = cur.fetchone()[0]
+            conn.close()
+            print(f"  Graph eval: {n_facts} row(s) in facts (subject–relation–object triples).")
+        except Exception as exc:
+            print(
+                f"  [WARN] Graph configs in run but facts table not usable: {exc}\n"
+                f"         chunk_*_graph / full_*_graph will fall back to vector+BM25 RRF only."
+            )
+
     # Accumulators: mode -> config -> category -> list of metric dicts
     AccType = Dict[str, Dict[str, Dict[str, List[Dict[str, float]]]]]
     acc: AccType = {
         m: {c: {cat: [] for cat in CATEGORIES} for c in configs} for m in modes
+    }
+    acc_layer: Dict[str, Dict[str, List[Dict[str, float]]]] = {
+        layer: {cat: [] for cat in CATEGORIES} for layer in PER_LAYER_TYPES
     }
 
     all_query_results: List[Dict[str, Any]] = []
@@ -819,6 +1099,39 @@ def main() -> None:
         }
         artifact_mode_results: Dict[str, Any] = {}
 
+        per_layer_row: Dict[str, Any] = {}
+        if args.per_layer_baseline:
+            for layer in PER_LAYER_TYPES:
+                hits_pl = _query_chroma(
+                    rag.collection,
+                    query_text,
+                    layer,
+                    TOP_K_RETRIEVAL,
+                    chroma_has_type,
+                    embed_fn,
+                )
+                video_ids_pl = [v for v, _ in _flatten_to_video_list(hits_pl)]
+                r5_pl = recall_at_k(video_ids_pl, relevant_ids, 5)
+                r10_pl = recall_at_k(video_ids_pl, relevant_ids, 10)
+                mrr_pl = mrr(video_ids_pl, relevant_ids)
+                ndcg_pl = ndcg_at_k(video_ids_pl, relevant_ids, TOP_K_FOR_METRICS)
+                if category in CATEGORIES:
+                    acc_layer[layer][category].append({
+                        "r5": float(r5_pl),
+                        "r10": float(r10_pl),
+                        "mrr": mrr_pl,
+                        "ndcg": ndcg_pl,
+                        "ac": 0.0,
+                    })
+                per_layer_row[layer] = {
+                    "recall_at_5": r5_pl,
+                    "recall_at_10": r10_pl,
+                    "mrr": round(mrr_pl, 4),
+                    "ndcg_at_10": round(ndcg_pl, 4),
+                    "top_video_ids": video_ids_pl[:10],
+                }
+            query_row["per_layer_baseline"] = per_layer_row
+
         for config in configs:
             query_row["configs"][config] = {}
 
@@ -829,20 +1142,33 @@ def main() -> None:
 
                 eff_config = _strip_bm25_config(config) if mode != "baseline" else config
 
-                if mode == "baseline":
-                    if _config_uses_bm25(config):
+                if _config_is_v2(config):
+                    # V2: live AskShortyV2.retrieve_videos (BM25 + segment + optional CE).
+                    from ask_shorty_v2 import v2_retrieval_ranked_list
+
+                    video_ids, before_hits = v2_retrieval_ranked_list(
+                        str(db_path), query_text
+                    )
+                    after_hits = list(before_hits)
+
+                elif mode == "baseline":
+                    if _config_uses_graph(config):
+                        video_ids, before_hits = run_baseline_hybrid_graph(
+                            rag, bm25_search, str(db_path), query_text, config,
+                            n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
+                            embed_fn=embed_fn,
+                        )
+                    elif _config_uses_bm25(config):
                         video_ids, before_hits = run_baseline_hybrid(
-                            rag,
-                            bm25_search,
-                            query_text,
-                            config,
-                            n=TOP_K_RETRIEVAL,
-                            chroma_has_type=chroma_has_type,
+                            rag, bm25_search, query_text, config,
+                            n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
+                            embed_fn=embed_fn,
                         )
                     else:
                         video_ids, before_hits = run_baseline(
-                            rag, query_text, config, n=TOP_K_RETRIEVAL,
-                            chroma_has_type=chroma_has_type,
+                            rag, query_text, config,
+                            n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
+                            embed_fn=embed_fn,
                         )
                     after_hits = before_hits  # no reranking
 
@@ -850,20 +1176,21 @@ def main() -> None:
                     video_ids, before_hits, after_hits = run_rerank_isolated(
                         rag, reranker, query_text, eff_config, title_map,
                         n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
+                        embed_fn=embed_fn,
                     )
 
                 elif mode == "rerank_grouped":
                     video_ids, before_hits, after_hits = run_rerank_grouped(
                         rag, reranker, query_text, eff_config, title_map,
                         n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
-                        expand_neighbors=False,
+                        expand_neighbors=False, embed_fn=embed_fn,
                     )
 
                 elif mode == "rerank_grouped_expanded":
                     video_ids, before_hits, after_hits = run_rerank_grouped(
                         rag, reranker, query_text, eff_config, title_map,
                         n=TOP_K_RETRIEVAL, chroma_has_type=chroma_has_type,
-                        expand_neighbors=True,
+                        expand_neighbors=True, embed_fn=embed_fn,
                     )
 
                 r5   = recall_at_k(video_ids, relevant_ids, 5)
@@ -956,17 +1283,65 @@ def main() -> None:
                         f"MRR={mv:.3f} NDCG={ng:.3f} (n={n})"
                     )
 
+    if args.per_layer_baseline:
+        print("\n" + "=" * 70)
+        print(
+            "PER-LAYER BASELINE  (each Chroma type alone, video dedup, same metrics as above)"
+        )
+        print("=" * 70)
+        for layer in PER_LAYER_TYPES:
+            print(f"\n  === Layer: {layer} ===")
+            for cat in CATEGORIES:
+                L = acc_layer[layer][cat]
+                if not L:
+                    continue
+                n = len(L)
+                r5 = sum(x["r5"] for x in L) / n
+                r10 = sum(x["r10"] for x in L) / n
+                mv = sum(x["mrr"] for x in L) / n
+                ng = sum(x["ndcg"] for x in L) / n
+                if cat == "specific_fact":
+                    ac = sum(x["ac"] for x in L) / n
+                    print(
+                        f"    {cat}: R@5={r5:.2f} R@10={r10:.2f} "
+                        f"MRR={mv:.3f} NDCG={ng:.3f} ans_correct={ac:.2f} (n={n})"
+                    )
+                else:
+                    print(
+                        f"    {cat}: R@5={r5:.2f} R@10={r10:.2f} "
+                        f"MRR={mv:.3f} NDCG={ng:.3f} (n={n})"
+                    )
+
     # -----------------------------------------------------------------------
     # Save JSON
     # -----------------------------------------------------------------------
-    out_json = {
+    out_json: Dict[str, Any] = {
         "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "db_path": str(db_path),
-        "queries_file": args.queries_file,
+        "queries_file": args.queries_file if not args.queries_dir else None,
+        "queries_dir": str(_resolve_queries_dir(Path(args.queries_dir))) if args.queries_dir else None,
+        "queries_source": queries_source,
         "configs": configs,
         "modes": modes,
         "results_per_query": all_query_results,
     }
+    if args.per_layer_baseline:
+        pl_summary: Dict[str, Any] = {}
+        for layer in PER_LAYER_TYPES:
+            pl_summary[layer] = {}
+            for cat in CATEGORIES:
+                L = acc_layer[layer][cat]
+                if not L:
+                    continue
+                n = len(L)
+                pl_summary[layer][cat] = {
+                    "n_queries": n,
+                    "recall_at_5": round(sum(x["r5"] for x in L) / n, 4),
+                    "recall_at_10": round(sum(x["r10"] for x in L) / n, 4),
+                    "mrr": round(sum(x["mrr"] for x in L) / n, 4),
+                    "ndcg_at_10": round(sum(x["ndcg"] for x in L) / n, 4),
+                }
+        out_json["per_layer_baseline_summary"] = pl_summary
     json_path = os.path.join(run_dir, "eval_results.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(out_json, f, indent=2)
@@ -994,6 +1369,25 @@ def main() -> None:
                 ac  = sum(x["ac"]   for x in L) / n if cat == "specific_fact" else 0.0
                 csv_rows.append([
                     mode, config, cat,
+                    f"{r5:.4f}", f"{r10:.4f}",
+                    f"{mv:.4f}", f"{ng:.4f}",
+                    f"{ac:.4f}", n,
+                ])
+
+    if args.per_layer_baseline:
+        for layer in PER_LAYER_TYPES:
+            for cat in CATEGORIES:
+                L = acc_layer[layer][cat]
+                if not L:
+                    continue
+                n = len(L)
+                r5 = sum(x["r5"] for x in L) / n
+                r10 = sum(x["r10"] for x in L) / n
+                mv = sum(x["mrr"] for x in L) / n
+                ng = sum(x["ndcg"] for x in L) / n
+                ac = sum(x["ac"] for x in L) / n if cat == "specific_fact" else 0.0
+                csv_rows.append([
+                    "per_layer_baseline", layer, cat,
                     f"{r5:.4f}", f"{r10:.4f}",
                     f"{mv:.4f}", f"{ng:.4f}",
                     f"{ac:.4f}", n,

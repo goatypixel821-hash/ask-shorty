@@ -152,29 +152,35 @@ def main() -> None:
         print("No videos with Shorties in DB.")
         return
 
+    cap = min(args.max_videos, len(videos))
     print("Found %d videos with Shorties. Generating query candidates..." % len(videos))
+    print("(No lines between videos = normal; each video = 1 Claude API call.)\n")
     all_queries: List[Dict[str, Any]] = []
     seen_ids = set()
 
-    for v in videos[: args.max_videos]:
+    for i, v in enumerate(videos[: args.max_videos], 1):
         video_id = v["video_id"]
         title = v["title"] or video_id
         shorty = v["shorty"] or ""
         micro = extract_micro_details(shorty)
         if not micro:
+            print("  [%d/%d] %s — skip (no MICRO-DETAILS / excerpt)" % (i, cap, video_id), flush=True)
             continue
         try:
+            print("  [%d/%d] %s — specific_fact …" % (i, cap, video_id), flush=True)
             candidates = generate_specific_fact_candidates(video_id, title, shorty, micro)
             for c in candidates:
                 if c["id"] not in seen_ids:
                     seen_ids.add(c["id"])
                     all_queries.append(c)
+            print("      -> %d question(s)" % len(candidates), flush=True)
         except Exception as e:
             print("  [%s] specific_fact error: %s" % (video_id, e))
 
     titles_and_ids = [(v["title"] or v["video_id"], v["video_id"]) for v in videos]
     sample_shorties = "\n\n---\n\n".join((v["shorty"] or "")[:500] for v in videos[:15])
     try:
+        print("\nThematic / cross_video / causal_chain (one more Claude call) …", flush=True)
         extra = generate_thematic_cross_causal(titles_and_ids, sample_shorties)
         for idx, q in enumerate(extra):
             q["id"] = "gen_%s_%d" % (q["category"][:2], len(all_queries) + idx)

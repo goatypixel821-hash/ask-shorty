@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ask Shorty V2 (hierarchical)</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0b1020;
+      color: #f5f5f7;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .shell {
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 24px 20px 40px;
+    }
+    .card {
+      background: radial-gradient(circle at top left, #1f2937, #020617);
+      border-radius: 20px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      box-shadow: 0 18px 45px rgba(15, 23, 42, 0.9);
+      padding: 24px 24px 28px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 26px;
+      letter-spacing: 0.03em;
+    }
+    .tagline {
+      margin: 0 0 8px;
+      color: #9ca3af;
+      font-size: 14px;
+    }
+    .nav-row {
+      margin: 0 0 18px;
+      font-size: 13px;
+    }
+    .nav-row a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    .nav-row a:hover {
+      text-decoration: underline;
+    }
+    label {
+      font-size: 13px;
+      color: #d1d5db;
+      display: block;
+      margin-bottom: 4px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 80px;
+      resize: vertical;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #4b5563;
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    textarea:focus {
+      outline: 2px solid #38bdf8;
+      outline-offset: 1px;
+      border-color: transparent;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #4b5563;
+      background: rgba(15, 23, 42, 0.9);
+      color: #e5e7eb;
+      font-size: 13px;
+    }
+    input[type="text"]:focus {
+      outline: 2px solid #38bdf8;
+      outline-offset: 1px;
+      border-color: transparent;
+    }
+    button {
+      border-radius: 999px;
+      border: none;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      color: #022c22;
+      box-shadow: 0 10px 25px rgba(22, 163, 74, 0.55);
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+      box-shadow: none;
+    }
+    .answer-card {
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(148, 163, 184, 0.4);
+    }
+    .answer-title {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #9ca3af;
+      margin-bottom: 8px;
+    }
+    .answer-box {
+      background: rgba(15, 23, 42, 0.85);
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      padding: 14px 14px 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .ref-id-line {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #64748b;
+    }
+    .meta {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #9ca3af;
+    }
+    .sources-list {
+      margin-top: 10px;
+      padding: 0;
+      list-style: none;
+    }
+    .sources-list li {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(148,163,184,0.1);
+      font-size: 12px;
+      color: #d1d5db;
+      flex-wrap: wrap;
+    }
+    .sources-list li:last-child { border-bottom: none; }
+    .src-title { font-weight: 500; color: #e5e7eb; }
+    .src-channel { color: #9ca3af; }
+    .src-date {
+      font-size: 11px;
+      color: #6b7280;
+      background: rgba(148,163,184,0.08);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+    /* ── Debug panel ─────────────────────────────────────────── */
+    .debug-wrap { margin-top: 16px; }
+    .debug-toggle-btn {
+      background: rgba(15,23,42,0.7);
+      border: 1px solid rgba(148,163,184,0.25);
+      border-radius: 8px;
+      color: #6b7280;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      padding: 4px 12px;
+      cursor: pointer;
+      box-shadow: none;
+      transition: color 0.15s;
+    }
+    .debug-toggle-btn:hover { color: #e5e7eb; border-color: rgba(148,163,184,0.5); }
+    .debug-panel { margin-top: 8px; }
+    .debug-log {
+      background: #020617;
+      border-radius: 10px;
+      border: 1px solid rgba(148,163,184,0.2);
+      padding: 10px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      max-height: 480px;
+      overflow-y: auto;
+      color: #64748b;
+      line-height: 1.65;
+    }
+    .de-ts    { color: #334155; margin-right: 6px; }
+    .de-step  { color: #34d399; }
+    .de-rewrite { color: #60a5fa; }
+    .de-chunk  { color: #f59e0b; }
+    .de-shorty { color: #a78bfa; }
+    .de-synq   { color: #38bdf8; }
+    .de-context { color: #fb923c; }
+    .de-done  { color: #4ade80; font-weight: bold; }
+    .de-err   { color: #f87171; }
+    .de-dim   { color: #374151; }
+    .de-sub   { color: #4b5563; margin-left: 14px; display: block; }
+    .de-preview { color: #374151; margin-left: 28px; font-style: italic; display: block; }
+    .error {
+      margin-top: 10px;
+      color: #fecaca;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="card">
+      <h1>Ask Shorty V2</h1>
+    <p class="tagline" style="color:#fbbf24">Hierarchical retrieval path — enable with ASK_SHORTY_V2=true. V1 unchanged at /ask.</p>
+      <p class="tagline">Ask anything from your indexed videos &amp; podcasts. Answers come from transcripts, Shorties, and synthetic questions.</p>
+      <p class="nav-row"><a href="/pending-review">Pending review</a> — manage videos waiting for Shorty processing</p>
+
+      <label for="question">Question</label>
+      <textarea id="question" placeholder="e.g. What did I watch about DCS-3000 and Red Hook?"></textarea>
+
+      <div class="controls">
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <label for="video-filter" style="margin:0;font-size:11px;">Limit to video IDs (optional, comma-separated)</label>
+          <input id="video-filter" type="text" placeholder="e.g. dQw4w9WgXcQ, abc123xyz89" />
+        </div>
+        <div style="flex:1;"></div>
+        <button id="ask-btn">
+          <span>Ask Shorty</span>
+        </button>
+      </div>
+
+      <div id="error" class="error" style="display:none;"></div>
+
+      <div class="answer-card" id="answer-card" style="display:none;">
+        <div class="answer-title">Answer</div>
+        <div class="answer-box" id="answer-box"></div>
+        <div class="ref-id-line" id="ref-id-line" style="display:none;"></div>
+        <div class="meta" id="meta-box"></div>
+        <ul class="sources-list" id="sources-list" style="display:none;"></ul>
+      </div>
+      <div class="meta" id="status-line" style="margin-top:8px;"></div>
+
+      <!-- Live debug panel -->
+      <div class="debug-wrap" id="debug-wrap" style="display:none;">
+        <button class="debug-toggle-btn" id="debug-toggle-btn" onclick="toggleDebug()">▶ pipeline debug</button>
+        <div class="debug-panel" id="debug-panel" style="display:none;">
+          <div class="debug-log" id="debug-log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const askBtn        = document.getElementById("ask-btn");
+    const qEl           = document.getElementById("question");
+    const vidEl         = document.getElementById("video-filter");
+    const errEl         = document.getElementById("error");
+    const answerCard    = document.getElementById("answer-card");
+    const answerBox     = document.getElementById("answer-box");
+    const refIdLine     = document.getElementById("ref-id-line");
+    const metaBox       = document.getElementById("meta-box");
+    const sourcesList   = document.getElementById("sources-list");
+    const statusLine    = document.getElementById("status-line");
+    const debugWrap     = document.getElementById("debug-wrap");
+    const debugPanel    = document.getElementById("debug-panel");
+    const debugToggleBtn= document.getElementById("debug-toggle-btn");
+    const debugLog      = document.getElementById("debug-log");
+
+    let _es = null;      // active EventSource
+    let _debugOpen = true;
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    function esc(s) {
+      if (s == null) return "";
+      return String(s)
+        .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function fmtMs(ms) {
+      if (ms == null) return "";
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    }
+
+    function fmtReasonPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(triple => esc(Array.isArray(triple) ? triple.join(" ") : String(triple))).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    /** Parse JSON from a fetch Response; avoids opaque "Failed to parse" when body is HTML or empty. */
+    async function readJsonOrThrow(response, label) {
+      const text = await response.text();
+      const snip = (text || "").trim().replace(/\s+/g, " ").slice(0, 240);
+      if (!text || !text.trim()) {
+        throw new Error(
+          label + ": empty response (HTTP " + response.status + "). Is the Ask server running?"
+        );
+      }
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        throw new Error(
+          label + ": not valid JSON (HTTP " + response.status + "). " + snip
+        );
+      }
+    }
+
+    function fmtGlobalPath(path) {
+      if (!path || !path.length) return "";
+      try {
+        return path.map(step => {
+          if (!Array.isArray(step) && !(step instanceof Array)) return esc(String(step));
+          const s = step[0], r = step[1], o = step[2], vid = step[3];
+          if (vid != null) return esc(`${s} ${r} ${o} [${vid}]`);
+          return esc(step.join(" "));
+        }).join(" → ");
+      } catch (e) {
+        return esc(String(path));
+      }
+    }
+
+    function appendDebug(html) {
+      const div = document.createElement("div");
+      div.innerHTML = html;
+      debugLog.appendChild(div);
+      debugLog.scrollTop = debugLog.scrollHeight;
+    }
+
+    function toggleDebug() {
+      _debugOpen = !_debugOpen;
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " pipeline debug";
+    }
+
+    // ── SSE event rendering ────────────────────────────────────────────────
+    function handleDebugEvent(ev) {
+      const ts = ev.elapsed_ms != null
+        ? `<span class="de-ts">[${fmtMs(ev.elapsed_ms)}]</span>`
+        : "";
+
+      switch (ev.type) {
+
+        case "step":
+          appendDebug(`${ts}<span class="de-step">✓ ${esc(ev.label)}</span>`);
+          break;
+
+        case "timing":
+          appendDebug(
+            `${ts}<span class="de-step">✓ V2 — full timing (ms): ${esc(JSON.stringify(ev.timing || {}))}</span>`
+          );
+          break;
+
+        case "rewrites": {
+          let h = `${ts}<span class="de-rewrite">◆ query rewrites</span>`;
+          h += `<span class="de-sub">original: ${esc(ev.original)}</span>`;
+          (ev.variants || []).forEach((v, i) => {
+            h += `<span class="de-sub">variant ${i+1}: ${esc(v)}</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "fusion": {
+          let h = `${ts}<span class="de-rewrite">◇ RRF fusion</span>`;
+          h += `<span class="de-sub">bm25_hits=${esc(ev.bm25_hits)} graph_hits=${esc(ev.graph_hits)} hsc_rank_len=${esc(ev.hsc_rank_len)} reason_rank_len=${esc(ev.reason_rank_len)} global_rank_len=${esc(ev.global_rank_len)}</span>`;
+          if (ev.query_type != null) {
+            h += `<span class="de-sub">query_type=${esc(ev.query_type)} layer=${esc(ev.layer_used)} event_hits=${esc(ev.event_hits)} segment_hits=${esc(ev.segment_hits)}</span>`;
+          }
+          if (ev.reasoning_paths && ev.reasoning_paths.length) {
+            h += `<span class="de-sub">graph reasoning (top ${ev.reasoning_paths.length})</span>`;
+            (ev.reasoning_paths || []).forEach((p, i) => {
+              const sc = (ev.path_scores && ev.path_scores[i] != null) ? ` score=${esc(ev.path_scores[i])}` : "";
+              h += `<span class="de-preview">[${i+1}]${sc} ${fmtReasonPath(p)}</span>`;
+            });
+          }
+          if (ev.rarity_scores && ev.rarity_scores.length) {
+            h += `<span class="de-sub">rarity_scores: ${esc(ev.rarity_scores.join(", "))}</span>`;
+          }
+          if (ev.node_frequencies_top && ev.node_frequencies_top.length) {
+            h += `<span class="de-preview">node_frequencies: ${esc(JSON.stringify(ev.node_frequencies_top))}</span>`;
+          }
+          (ev.rrf_top || []).forEach(row => {
+            h += `<span class="de-sub">· ${esc(row.video_id)} rrf=${esc(String(row.rrf))} [${esc(row.sources)}]</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "hsc": {
+          let h = `${ts}<span class="de-rewrite">◇ HSC</span>`;
+          h += `<span class="de-sub">type=${esc(ev.query_type)} layer=${esc(ev.layer_used)} reason=${esc(ev.route_reason)}</span>`;
+          h += `<span class="de-sub">event_hits=${esc(ev.event_hits)} segment_hits=${esc(ev.segment_hits)} reason_rank_len=${esc(ev.reason_rank_len)} global_rank_len=${esc(ev.global_rank_len)}</span>`;
+          if (ev.query_entities && ev.query_entities.length) {
+            h += `<span class="de-sub">entities: ${esc(ev.query_entities.join(", "))}</span>`;
+          }
+          if (ev.reasoning_paths && ev.reasoning_paths.length) {
+            (ev.reasoning_paths || []).forEach((p, i) => {
+              const sc = (ev.path_scores && ev.path_scores[i] != null) ? ` score=${esc(ev.path_scores[i])}` : "";
+              h += `<span class="de-preview">path[${i+1}]${sc}: ${fmtReasonPath(p)}</span>`;
+            });
+          }
+          if (ev.global_paths && ev.global_paths.length) {
+            (ev.global_paths || []).forEach((p, i) => {
+              const sc = (ev.global_path_scores && ev.global_path_scores[i] != null) ? ` score=${esc(ev.global_path_scores[i])}` : "";
+              const vids = (ev.videos_in_path && ev.videos_in_path[i]) ? ` videos=${esc(JSON.stringify(ev.videos_in_path[i]))}` : "";
+              h += `<span class="de-preview">global[${i+1}]${sc}${vids}: ${fmtGlobalPath(p)}</span>`;
+            });
+          }
+          if (ev.rarity_scores && ev.rarity_scores.length) {
+            h += `<span class="de-sub">rarity_scores: ${esc(ev.rarity_scores.join(", "))}</span>`;
+          }
+          if (ev.node_frequencies_top && ev.node_frequencies_top.length) {
+            h += `<span class="de-preview">node_frequencies: ${esc(JSON.stringify(ev.node_frequencies_top))}</span>`;
+          }
+          appendDebug(h);
+          break;
+        }
+
+        case "hits": {
+          const cls = {chunk:"de-chunk", shorty:"de-shorty", synq:"de-synq"}[ev.layer] || "de-step";
+          let h = `${ts}<span class="${cls}">▸ ${esc(ev.layer)} — ${ev.count} hit(s)</span>`;
+          (ev.hits || []).forEach(hit => {
+            const score = hit.score != null ? ` <span class="de-dim">score=${hit.score}</span>` : "";
+            const ci    = hit.chunk_index != null ? ` <span class="de-dim">chunk#${hit.chunk_index}</span>` : "";
+            const chan  = hit.channel ? ` <span class="de-dim">@${esc(hit.channel)}</span>` : "";
+            const wd    = hit.watch_date ? ` <span class="de-dim">${esc(hit.watch_date)}</span>` : "";
+            const fus   = hit.fusion_source ? ` <span class="de-dim">[${esc(hit.fusion_source)}]</span>` : "";
+            h += `<span class="de-sub">· ${esc(hit.title || hit.video_id)}${chan}${wd}${score}${ci}${fus}</span>`;
+            if (hit.preview) {
+              h += `<span class="de-preview">"${esc(hit.preview.substring(0,120))}…"</span>`;
+            }
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "context": {
+          let h = `${ts}<span class="de-context">■ context → LLM: ${ev.count} block(s)</span>`;
+          (ev.blocks || []).forEach((b, i) => {
+            const lines = b.split("\n");
+            const header  = lines[0] || "";
+            const preview = (lines.slice(1).join(" ").trim()).substring(0, 120);
+            h += `<span class="de-sub">[${i+1}] ${esc(header)}</span>`;
+            if (preview) h += `<span class="de-preview">"${esc(preview)}…"</span>`;
+          });
+          appendDebug(h);
+          break;
+        }
+
+        case "done":
+          appendDebug(`${ts}<span class="de-done">✔ done in ${fmtMs(ev.total_elapsed_ms)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "error":
+          appendDebug(`${ts}<span class="de-err">✗ error: ${esc(ev.message)}</span>`);
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "stream_end":
+          if (_es) { _es.close(); _es = null; }
+          break;
+
+        case "keepalive":
+          break; // silent
+      }
+    }
+
+    function startDebugStream(jobId) {
+      if (_es) { _es.close(); _es = null; }
+      debugLog.innerHTML = "";
+      debugWrap.style.display  = "block";
+      debugPanel.style.display = _debugOpen ? "block" : "none";
+      debugToggleBtn.textContent = (_debugOpen ? "▼" : "▶") + " pipeline debug";
+
+      _es = new EventSource(`/api/ask/stream/${jobId}`);
+      _es.onmessage = (e) => {
+        try { handleDebugEvent(JSON.parse(e.data)); } catch (_) {}
+      };
+      _es.onerror = () => {
+        appendDebug(`<span class="de-err">stream connection lost</span>`);
+        _es.close(); _es = null;
+      };
+    }
+
+    async function doAsk() {
+      const q = qEl.value.trim();
+      const rawVideos = vidEl.value.trim();
+      errEl.style.display = "none";
+      errEl.textContent = "";
+      answerCard.style.display = "none";
+      answerBox.textContent = "";
+      if (refIdLine) {
+        refIdLine.textContent = "";
+        refIdLine.style.display = "none";
+      }
+      metaBox.textContent = "";
+      sourcesList.innerHTML = "";
+      sourcesList.style.display = "none";
+      statusLine.textContent = "";
+      // Reset debug panel for new query
+      if (_es) { _es.close(); _es = null; }
+      debugWrap.style.display = "none";
+      debugLog.innerHTML = "";
+
+      if (!q) {
+        errEl.textContent = "Please enter a question.";
+        errEl.style.display = "block";
+        return;
+      }
+
+      askBtn.disabled = true;
+      askBtn.textContent = "Thinking...";
+      try {
+        let video_ids = null;
+        if (rawVideos) {
+          video_ids = rawVideos.split(",").map(v => v.trim()).filter(Boolean);
+        }
+        console.log("[ask-ui] Sending /api/ask_v2 with question:", q, "video_ids:", video_ids);
+        const resp = await fetch("/api/ask_v2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q, video_ids })
+        });
+        const data = await readJsonOrThrow(resp, "/api/ask_v2");
+        console.log("[ask-ui] /api/ask_v2 response:", resp.status, data);
+        if (!resp.ok || !data.success) {
+          throw new Error(data.error || "Failed to start Ask job.");
+        }
+
+        const jobId = data.job_id;
+        console.log("[ask-ui] Received jobId:", jobId);
+        statusLine.textContent = `Thinking... job #${jobId}`;
+        startDebugStream(jobId);
+
+        // Poll for up to 5 minutes (300 seconds)
+        const maxMs = 300000;
+        const intervalMs = 2000;
+
+        async function pollOnce(elapsedMs) {
+          console.log("[ask-ui] pollOnce called, elapsedMs=", elapsedMs, "jobId=", jobId);
+          if (elapsedMs >= maxMs) {
+            statusLine.textContent = "";
+            errEl.textContent = "Timed out waiting for Ask Shorty to finish. Please try again.";
+            errEl.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+            return;
+          }
+
+          try {
+            const r = await fetch(`/api/ask/result/${jobId}`);
+            const body = await readJsonOrThrow(r, "/api/ask/result");
+            console.log("[ask-ui] /api/ask/result response:", r.status, body);
+
+            if (!r.ok) {
+              // Treat HTTP error as fatal for this job
+              throw new Error(body.error || "Error fetching result.");
+            }
+
+            if (body.status === "pending" || body.status === "running") {
+              statusLine.textContent = `Thinking... (${body.status})`;
+              console.log("[ask-ui] Job still in progress, scheduling next poll...");
+              setTimeout(() => pollOnce(elapsedMs + intervalMs), intervalMs);
+              return;
+            }
+
+            // Completed or error: stop polling
+            if (body.status === "error" || !body.success) {
+              const msg = body.error || "Process crashed - please retry";
+              statusLine.textContent = "";
+              errEl.textContent = msg;
+              errEl.style.display = "block";
+              askBtn.disabled = false;
+              askBtn.textContent = "Ask Shorty";
+              console.log("[ask-ui] Job completed with error:", msg);
+              return;
+            }
+
+            // status === completed and success === true
+            statusLine.textContent = "Answer ready.";
+            answerBox.textContent = body.answer || "(No answer returned.)";
+            if (refIdLine) {
+              if (body.ref_id) {
+                refIdLine.textContent = "Saved as " + body.ref_id;
+                refIdLine.style.display = "block";
+              } else {
+                refIdLine.textContent = "";
+                refIdLine.style.display = "none";
+              }
+            }
+            const ctx = body.used_context || [];
+            metaBox.textContent = ctx.length
+              ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`
+              : "No context details available.";
+
+            // Render per-video source citations with watch dates
+            const sources = body.sources || [];
+            sourcesList.innerHTML = "";
+            if (sources.length) {
+              sources.forEach(src => {
+                const li = document.createElement("li");
+                const titleSpan = document.createElement("span");
+                titleSpan.className = "src-title";
+                titleSpan.textContent = src.title || src.video_id;
+                li.appendChild(titleSpan);
+                if (src.channel) {
+                  const chanSpan = document.createElement("span");
+                  chanSpan.className = "src-channel";
+                  chanSpan.textContent = "by " + src.channel;
+                  li.appendChild(chanSpan);
+                }
+                if (src.watch_date) {
+                  const dateSpan = document.createElement("span");
+                  dateSpan.className = "src-date";
+                  dateSpan.textContent = "watched: " + src.watch_date;
+                  li.appendChild(dateSpan);
+                }
+                sourcesList.appendChild(li);
+              });
+              sourcesList.style.display = "block";
+            }
+
+            answerCard.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+          } catch (err) {
+            console.error("[ask-ui] Polling error:", err);
+            statusLine.textContent = "";
+            errEl.textContent = err.message || String(err);
+            errEl.style.display = "block";
+            askBtn.disabled = false;
+            askBtn.textContent = "Ask Shorty";
+          }
+        }
+
+        // Kick off first poll
+        pollOnce(0);
+      } catch (e) {
+        errEl.textContent = e.message || String(e);
+        errEl.style.display = "block";
+      } finally {
+        // Button will be re-enabled by polling completion / error handlers.
+      }
+    }
+
+    // Pre-fill from Observatory query params (?q=...&video_ids=...)
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const pq = params.get("q");
+      const pv = params.get("video_ids");
+      if (pq) qEl.value = pq;
+      if (pv) vidEl.value = pv;
+    })();
+
+    askBtn.addEventListener("click", doAsk);
+    qEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        doAsk();
+      }
+    });
+  </script>
+</body>
+</html>
+

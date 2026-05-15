@@ -10,9 +10,11 @@ then Save & Vectorize stores the transcript, queues Shorty/questions/entities, a
 import sys
 import os
 import re
+import subprocess
 import threading
 import logging
 from pathlib import Path
+from typing import Optional
 
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -46,9 +48,104 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-base_dir = Path(__file__).parent
+base_dir = Path(__file__).resolve().parent
 db_path = base_dir / 'data' / 'transcripts.db'
 grab_log_path = base_dir / 'data' / 'grab_log.txt'
+
+_DEFAULT_OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct"
+
+
+def _load_project_dotenv() -> None:
+    """
+    Load .env files so OPENROUTER_* matches how you launch the grabber.
+
+    Uses override=False: variables already set in the process environment (e.g. the
+    terminal) are never replaced by .env values. Each .env only defines defaults for
+    keys that are still unset; among files, earlier paths in the list win for a key.
+
+    Order:
+    - .env next to this script (shorty repo)
+    - .env in the process current working directory (e.g. youtube-history-viewer-copy)
+    - .env under SHORTY_PROJECT_ROOT if set (explicit shorty checkout)
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    roots = [base_dir, Path.cwd().resolve()]
+    sr = (os.environ.get("SHORTY_PROJECT_ROOT") or "").strip()
+    if sr:
+        roots.append(Path(sr).resolve())
+    seen = set()
+    for root in roots:
+        env_path = root / ".env"
+        if not env_path.is_file():
+            continue
+        key = str(env_path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        load_dotenv(env_path, override=False)
+
+
+_load_project_dotenv()
+
+
+def _openrouter_key_status_line() -> str:
+    """Safe one-line status for logs (never print full API key)."""
+    raw = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not raw:
+        return "OPENROUTER_API_KEY=(not set)"
+    return "OPENROUTER_API_KEY=%s… (len=%d)" % (raw[:8], len(raw))
+
+
+def _batch_processor_script() -> Optional[Path]:
+    """
+    Resolve batch_processor.py. When this script lives outside shorty (e.g. a copy
+    under youtube-history-viewer-copy), set SHORTY_PROJECT_ROOT to the shorty repo path.
+    """
+    here = base_dir / "batch_processor.py"
+    if here.is_file():
+        return here.resolve()
+    sr = (os.environ.get("SHORTY_PROJECT_ROOT") or "").strip()
+    if sr:
+        p = (Path(sr).resolve() / "batch_processor.py")
+        if p.is_file():
+            return p
+    cwd_bp = (Path.cwd().resolve() / "batch_processor.py")
+    if cwd_bp.is_file():
+        return cwd_bp
+    return None
+
+
+def _pipeline_log(msg: str) -> None:
+    """Same as _out for files/stderr, plus stdout so the grabber terminal shows pipeline progress."""
+    _out(msg)
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+
+
+def _log_startup_openrouter_and_batch() -> None:
+    bp = _batch_processor_script()
+    bp_s = str(bp) if bp else "(not found — put batch_processor.py next to video_grabber.py or set SHORTY_PROJECT_ROOT)"
+    line = (
+        "[grabber] %s | batch_processor=%s | grabber_script_dir=%s | cwd=%s"
+        % (
+            _openrouter_key_status_line(),
+            bp_s,
+            str(base_dir),
+            str(Path.cwd().resolve()),
+        )
+    )
+    logger.info(line)
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    # Same path as other grab lines (stderr + data/grab_log.txt); print alone is easy to miss if stdout is redirected.
+    _out(line)
 
 
 def _out(msg: str):
@@ -71,6 +168,7 @@ rag = TranscriptRAG()
 
 logger.info("Video Grabber Service initialized")
 logger.info(f"Database: {db_path}")
+_log_startup_openrouter_and_batch()
 
 
 def _extract_video_id(url: str):
@@ -113,6 +211,185 @@ def enqueue_llm_tasks_for_video(video_id: str):
         logger.error(f"Queue enqueue error for {video_id}: {e}", exc_info=True)
 
 
+def _openrouter_model_name() -> str:
+    v = (os.environ.get("OPENROUTER_MODEL") or "").strip()
+    return v or _DEFAULT_OPENROUTER_MODEL
+
+
+def _append_batch_processor_log(header: str, proc: subprocess.CompletedProcess) -> None:
+    try:
+        grab_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(grab_log_path, "a", encoding="utf-8") as gf:
+            gf.write(header + "\n")
+            if proc.stdout:
+                gf.write(proc.stdout)
+            if proc.stderr:
+                gf.write(proc.stderr)
+            gf.flush()
+    except Exception:
+        pass
+
+
+def _run_batch_processor_subprocess(bp_args: list) -> subprocess.CompletedProcess:
+    script = _batch_processor_script()
+    if not script:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=127,
+            stdout="",
+            stderr="batch_processor.py not found",
+        )
+    cmd = [sys.executable, str(script), "--db-path", str(db_path.resolve())] + bp_args
+    return subprocess.run(
+        cmd,
+        cwd=str(script.parent),
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=None,
+    )
+
+
+def _openrouter_background_pipeline_worker(video_id: str) -> None:
+    model = _openrouter_model_name()
+    try:
+        _pipeline_log(
+            f"[OpenRouter pipeline] START video_id={video_id} model={model} "
+            f"(main excludes triples,segments,events)"
+        )
+        main_args = [
+            "--provider",
+            "openrouter",
+            "--model",
+            model,
+            "--queue",
+            "--video-id",
+            video_id,
+            "--exclude-tasks",
+            "triples,segments,events",
+        ]
+        r = _run_batch_processor_subprocess(main_args)
+        _append_batch_processor_log(
+            f"\n--- batch_processor main {' '.join(main_args)} exit={r.returncode} ---\n",
+            r,
+        )
+        if r.returncode != 0:
+            _pipeline_log(f"[OpenRouter pipeline] MAIN_FAIL video_id={video_id} exit={r.returncode}")
+            return
+        _pipeline_log(f"[OpenRouter pipeline] MAIN_DONE video_id={video_id}")
+
+        _pipeline_log(f"[OpenRouter pipeline] TRIPLES_START video_id={video_id}")
+        trip_args = [
+            "--provider",
+            "openrouter",
+            "--model",
+            model,
+            "--queue",
+            "--video-id",
+            video_id,
+            "--only-tasks",
+            "triples",
+        ]
+        r2 = _run_batch_processor_subprocess(trip_args)
+        _append_batch_processor_log(
+            f"\n--- batch_processor triples {' '.join(trip_args)} exit={r2.returncode} ---\n",
+            r2,
+        )
+        if r2.returncode != 0:
+            _pipeline_log(f"[OpenRouter pipeline] TRIPLES_FAIL video_id={video_id} exit={r2.returncode}")
+        else:
+            _pipeline_log(f"[OpenRouter pipeline] TRIPLES_DONE video_id={video_id}")
+
+            _pipeline_log(f"[OpenRouter pipeline] SEGMENTS_START video_id={video_id}")
+            seg_args = [
+                "--provider",
+                "openrouter",
+                "--model",
+                model,
+                "--queue",
+                "--video-id",
+                video_id,
+                "--only-tasks",
+                "segments",
+            ]
+            r3 = _run_batch_processor_subprocess(seg_args)
+            _append_batch_processor_log(
+                f"\n--- batch_processor segments {' '.join(seg_args)} exit={r3.returncode} ---\n",
+                r3,
+            )
+            if r3.returncode != 0:
+                _pipeline_log(
+                    f"[OpenRouter pipeline] SEGMENTS_FAIL video_id={video_id} exit={r3.returncode}"
+                )
+            else:
+                _pipeline_log(f"[OpenRouter pipeline] SEGMENTS_DONE video_id={video_id}")
+
+            _pipeline_log(f"[OpenRouter pipeline] EVENTS_START video_id={video_id}")
+            ev_args = [
+                "--provider",
+                "openrouter",
+                "--model",
+                model,
+                "--queue",
+                "--video-id",
+                video_id,
+                "--only-tasks",
+                "events",
+            ]
+            r4 = _run_batch_processor_subprocess(ev_args)
+            _append_batch_processor_log(
+                f"\n--- batch_processor events {' '.join(ev_args)} exit={r4.returncode} ---\n",
+                r4,
+            )
+            if r4.returncode != 0:
+                _pipeline_log(
+                    f"[OpenRouter pipeline] EVENTS_FAIL video_id={video_id} exit={r4.returncode}"
+                )
+            else:
+                _pipeline_log(f"[OpenRouter pipeline] EVENTS_DONE video_id={video_id}")
+
+        _pipeline_log(f"[OpenRouter pipeline] FINISH video_id={video_id}")
+    except Exception as e:
+        logger.error(f"OpenRouter pipeline error for {video_id}: {e}", exc_info=True)
+        try:
+            _pipeline_log(f"[OpenRouter pipeline] ERROR video_id={video_id}: {e}")
+        except Exception:
+            pass
+
+
+def _maybe_spawn_openrouter_pipeline(video_id: str) -> None:
+    if not (os.environ.get("OPENROUTER_API_KEY") or "").strip():
+        return
+    if not _batch_processor_script():
+        _pipeline_log(
+            "[OpenRouter pipeline] SKIP: batch_processor.py not found "
+            "(set SHORTY_PROJECT_ROOT to your shorty repo, or run grabber from shorty)."
+        )
+        logger.error("OpenRouter pipeline skipped: batch_processor.py not found")
+        return
+    _pipeline_log(f"[OpenRouter pipeline] Scheduling background run for video_id={video_id}")
+    t = threading.Thread(
+        target=_openrouter_background_pipeline_worker,
+        args=(video_id,),
+        daemon=True,
+        name=f"openrouter-pipeline-{video_id}",
+    )
+    t.start()
+
+
+def _finalize_saved_transcript(
+    video_id: str,
+    transcript_chars: int,
+) -> None:
+    """Vectorize, enqueue LLM tasks, optionally run OpenRouter batch (non-blocking)."""
+    _out(f"Transcript saved: {video_id} ({transcript_chars} chars)")
+    _out("Vectorizing in background...")
+    vectorize_video_in_background(video_id)
+    enqueue_llm_tasks_for_video(video_id)
+    _maybe_spawn_openrouter_pipeline(video_id)
+    _out("Done.")
+
+
 def _strip_timestamps_from_paste(text: str) -> str:
     if not text:
         return text
@@ -133,6 +410,8 @@ def root():
         'endpoints': {
             'grab': '/grab (GET: url, title, channel as query params)',
             'save': '/api/save-transcript (POST)',
+            'fetch': '/api/fetch-transcript (POST)',
+            'save_pasted': '/api/save-pasted-transcript (POST)',
             'health': '/health',
             'status': '/api/status'
         }
@@ -203,11 +482,7 @@ def save_transcript():
         except Exception as e:
             _out(f"Warning: failed to set watch_date for {video_id}: {e}")
 
-        _out(f"Transcript saved: {video_id} ({len(transcript_text)} chars)")
-        _out("Vectorizing in background...")
-        vectorize_video_in_background(video_id)
-        enqueue_llm_tasks_for_video(video_id)
-        _out("Done.")
+        _finalize_saved_transcript(video_id, len(transcript_text))
 
         return jsonify({
             'success': True,
@@ -216,6 +491,131 @@ def save_transcript():
         })
     except Exception as e:
         logger.error(f"save-transcript: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/fetch-transcript', methods=['POST'])
+def api_fetch_transcript():
+    """
+    Auto-fetch transcript from YouTube (youtube-transcript-api). On success, same follow-up as save-transcript.
+    If the video has no auto transcript, returns paste_required for the quick-fetch bookmarklet flow.
+    """
+    try:
+        data = request.json or {}
+        url = (data.get('url') or '').strip()
+        title = (data.get('title') or '').strip() or 'Untitled'
+        channel = (data.get('channel') or '').strip() or 'Unknown channel'
+        video_id = _extract_video_id(url)
+        if not video_id:
+            return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
+
+        from simple_transcript_fetcher import SimpleTranscriptFetcher
+
+        fetcher = SimpleTranscriptFetcher(str(db_path))
+        result = fetcher.fetch_transcript_from_url(url, title, channel)
+
+        if result.get('success'):
+            msg = result.get('message') or ''
+            if msg == 'Transcript already exists' or result.get('cached'):
+                return jsonify({
+                    'success': True,
+                    'video_id': result.get('video_id') or video_id,
+                    'message': msg or 'Transcript already exists',
+                })
+            transcript_text = (result.get('transcript') or '').strip()
+            if transcript_text:
+                try:
+                    db.set_watch_date(video_id)
+                except Exception as e:
+                    _out(f"Warning: failed to set watch_date for {video_id}: {e}")
+                _finalize_saved_transcript(video_id, len(transcript_text))
+                return jsonify({
+                    'success': True,
+                    'video_id': video_id,
+                    'message': result.get('message') or 'Transcript fetched and saved',
+                })
+            return jsonify({
+                'success': True,
+                'video_id': video_id,
+                'warning': True,
+                'message': 'Video saved but transcript text was empty.',
+            })
+
+        err_raw = (result.get('error') or 'Unknown error')
+        err_l = err_raw.lower()
+        if any(
+            s in err_l
+            for s in (
+                'no transcript',
+                'disabled',
+                'not available',
+                'could not retrieve',
+                'subtitles are disabled',
+            )
+        ):
+            canonical = url if url else f'https://www.youtube.com/watch?v={video_id}'
+            try:
+                db.add_video(video_id, title, channel, canonical)
+            except Exception as e:
+                logger.warning(f"fetch-transcript add_video: {e}")
+            return jsonify({
+                'success': True,
+                'paste_required': True,
+                'video_id': video_id,
+                'title': title,
+                'channel': channel,
+                'url': canonical,
+                'message': err_raw,
+            })
+
+        return jsonify({'success': False, 'error': err_raw}), 400
+    except Exception as e:
+        logger.error(f"fetch-transcript: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/save-pasted-transcript', methods=['POST'])
+def api_save_pasted_transcript():
+    """Paste fallback for quick-fetch: same persistence and background work as /api/save-transcript."""
+    try:
+        data = request.json or {}
+        transcript_text = (data.get('transcript_text') or '').strip()
+        url = (data.get('url') or '').strip()
+        title = (data.get('title') or '').strip() or 'Untitled'
+        channel = (data.get('channel') or '').strip() or 'Unknown channel'
+        video_id = (data.get('video_id') or '').strip()
+        if not video_id:
+            vid = _extract_video_id(url)
+            video_id = vid or ''
+        if not video_id:
+            return jsonify({'success': False, 'error': 'Missing video_id'}), 400
+        if not transcript_text:
+            return jsonify({'success': False, 'error': 'Transcript is empty. Paste the text first.'}), 400
+
+        transcript_text = _strip_timestamps_from_paste(transcript_text)
+        if not transcript_text:
+            return jsonify({'success': False, 'error': 'Transcript had only timestamps. Paste the actual text.'}), 400
+
+        canonical_url = url if url else f'https://www.youtube.com/watch?v={video_id}'
+        db.add_video(video_id, title, channel, canonical_url)
+        success = db.save_transcript(video_id, transcript_text)
+        if not success:
+            return jsonify({'success': False, 'error': 'Failed to save transcript'}), 500
+
+        try:
+            db.set_watch_date(video_id)
+        except Exception as e:
+            _out(f"Warning: failed to set watch_date for {video_id}: {e}")
+
+        _finalize_saved_transcript(video_id, len(transcript_text))
+
+        return jsonify({
+            'success': True,
+            'video_id': video_id,
+            'message': 'Transcript saved and vectorizing in background.',
+        })
+    except Exception as e:
+        logger.error(f"save-pasted-transcript: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

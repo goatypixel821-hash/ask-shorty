@@ -4,21 +4,33 @@ Flask app exposing the Ask Shorty UI and API.
 
 Routes:
 - GET /ask               -> HTML UI
-- POST /api/ask          -> enqueue question, return job_id
-- GET /api/ask/result/<job_id> -> poll for answer
+- POST /api/ask          -> enqueue question, return job_id (ref_id null until done)
+- GET /ask_v2            -> V2 UI (requires ASK_SHORTY_V2=true)
+- POST /api/ask_v2       -> V2 hierarchical RAG job queue
+- GET /api/ask/result/<job_id> -> poll for answer (includes ref_id when completed)
+- GET /api/ask/ref/<ref_id> -> fetch completed job by human-readable ref_id
+- GET /agent             -> Agent Mode UI
+- POST /api/agent/ask    -> enqueue agent-mode question
+- GET /api/agent/result/<job_id> -> poll (same as ask result)
+- GET /api/agent/stream/<job_id> -> SSE (same stream as ask)
+- POST /api/agent/cancel/<job_id> -> cancel a pending/running agent job
+- DELETE /api/agent/job/<job_id> -> same as cancel
 """
 
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, after_this_request
 
+import os
 import json
 import queue as _queue
+import secrets
+import string
 import shutil
 import sqlite3
 import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import build_courses
 import export_course
@@ -26,6 +38,11 @@ import export_course
 print("Step 1: importing AskShorty...")
 from ask_shorty import AskShorty
 from transcript_database import TranscriptDatabase
+try:
+    from filter_ad_videos import PendingVideo as _AdPendingVideo, looks_like_ad as _looks_like_ad
+except Exception:
+    _AdPendingVideo = None
+    _looks_like_ad = None
 
 
 app = Flask(__name__)
@@ -51,23 +68,129 @@ def get_engine() -> AskShorty:
     return _engine
 
 
+_engine_v2 = None
+
+
+def _v2_flag_enabled() -> bool:
+    return os.getenv("ASK_SHORTY_V2", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_engine_v2():
+    """Lazy Ask Shorty V2 engine (separate from V1 AskShorty)."""
+    global _engine_v2
+    if _engine_v2 is None:
+        from ask_shorty_v2 import AskShortyV2
+
+        _engine_v2 = AskShortyV2()
+        try:
+            _engine_v2._lazy_load()
+        except Exception as e:
+            print(
+                "Ask Shorty V2: warm preload failed (will retry on first query):",
+                repr(e),
+                flush=True,
+            )
+    return _engine_v2
+
+
 db = TranscriptDatabase()
+
+# SQLite: wait on busy locks + WAL for concurrent app + batch workers.
+_SQLITE_BUSY_TIMEOUT_SEC = 30.0
+
+
+def _sqlite_connect(database_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(database_path, timeout=_SQLITE_BUSY_TIMEOUT_SEC)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 _jobs_dir = Path(__file__).parent / "data" / "jobs"
 _jobs_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _startup_storage_diagnostic() -> None:
+    """
+    Print effective storage locations at startup (similar to grabber diagnostic).
+    """
+    base_dir = Path(__file__).resolve().parent
+    db_raw = getattr(db, "db_path", os.environ.get("ASK_SHORTY_DB_PATH") or "")
+    db_path_eff = str(Path(str(db_raw)).resolve()) if str(db_raw).strip() else str((base_dir / "data" / "transcripts.db").resolve())
+    chroma_raw = (os.environ.get("ASK_SHORTY_CHROMA_PATH") or "").strip()
+    chroma_eff = chroma_raw or str((base_dir / "data" / "transcript_chroma_finetuned").resolve())
+    line = (
+        "[ask-shorty-app] db_path=%s | chroma_path=%s | cwd=%s"
+        % (db_path_eff, chroma_eff, str(Path.cwd().resolve()))
+    )
+    print(line, flush=True)
+
+
+_startup_storage_diagnostic()
 
 # Per-job SSE event queues.  Created in api_ask before the worker thread
 # starts so a client can connect immediately and receive every event.
 _job_events: Dict[int, _queue.Queue] = {}
+_job_cancel_events: Dict[int, threading.Event] = {}
 
 # Course generation SSE (same pattern as /api/ask/stream)
 _course_job_events: Dict[int, _queue.Queue] = {}
 _course_job_next_id = 1
 _course_job_lock = threading.Lock()
 
+# Agent jobs the user cancelled from the UI (worker checks this + DB before writing "completed").
+_cancelled_agent_job_ids: Set[int] = set()
+_cancel_agent_lock = threading.Lock()
+# If a row stays "running" longer than this (see updated_at), polling marks timeout.
+JOB_RUNNING_TIMEOUT_SEC = 120
+
+
+def _parse_job_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    s = str(value).strip()[:19]
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", ""))
+        except Exception:
+            return None
+
+
+def _seconds_since_job_timestamp(ts: Optional[str]) -> Optional[float]:
+    t = _parse_job_timestamp(ts)
+    if t is None:
+        return None
+    return (datetime.now() - t).total_seconds()
+
+
+def _should_skip_late_completion_write(job_id: int) -> bool:
+    """True if DB already says cancelled or poll-side timeout — do not overwrite with completed."""
+    try:
+        conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT status, IFNULL(error, '') FROM ask_jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+    except Exception as exc:
+        print(f"[ask_jobs] skip completion check failed for job_id={job_id}: {exc!r}")
+        return False
+    if not row:
+        return True
+    status, err = row[0], (row[1] or "").strip().lower()
+    if status == "cancelled":
+        return True
+    if status == "error" and err == "timeout":
+        return True
+    return False
+
 
 def _ensure_jobs_table() -> None:
     """Create ask_jobs table if it doesn't exist."""
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -79,7 +202,8 @@ def _ensure_jobs_table() -> None:
             answer TEXT,
             error TEXT,
             created_at TIMESTAMP,
-            updated_at TIMESTAMP
+            updated_at TIMESTAMP,
+            ref_id TEXT
         )
         """
     )
@@ -87,12 +211,46 @@ def _ensure_jobs_table() -> None:
     conn.close()
 
 
+def _ensure_ref_id_column() -> None:
+    """Add ref_id to ask_jobs if upgrading from an older schema."""
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(ask_jobs)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if "ref_id" not in cols:
+        cursor.execute("ALTER TABLE ask_jobs ADD COLUMN ref_id TEXT")
+        conn.commit()
+    conn.close()
+
+
+def _new_ask_ref_id() -> str:
+    """ASK-YYYYMMDD-XXXX with XXXX = 4 random uppercase alphanumeric."""
+    d = datetime.now().strftime("%Y%m%d")
+    alphabet = string.ascii_uppercase + string.digits
+    suffix = "".join(secrets.choice(alphabet) for _ in range(4))
+    return f"ASK-{d}-{suffix}"
+
+
+def _allocate_ref_id() -> str:
+    """Pick a ref_id not already present in ask_jobs (collision retry)."""
+    for _ in range(32):
+        rid = _new_ask_ref_id()
+        conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM ask_jobs WHERE ref_id = ? LIMIT 1", (rid,))
+        taken = cur.fetchone() is not None
+        conn.close()
+        if not taken:
+            return rid
+    return _new_ask_ref_id() + secrets.choice(string.ascii_uppercase)
+
+
 def _cleanup_stale_jobs() -> None:
     """
     On app startup, mark any jobs that were left in pending/running state
     as error, since the previous process likely crashed during generation.
     """
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
@@ -110,6 +268,7 @@ def _cleanup_stale_jobs() -> None:
 
 
 _ensure_jobs_table()
+_ensure_ref_id_column()
 _cleanup_stale_jobs()
 
 
@@ -117,8 +276,7 @@ def _update_job(job_id: int, **fields) -> None:
     """Helper to update a job row safely from worker thread."""
     if not fields:
         return
-    # Use a short timeout so we don't hang indefinitely on a locked DB.
-    conn = sqlite3.connect(db.db_path, timeout=5.0)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cols = ", ".join(f"{k} = ?" for k in fields.keys())
@@ -148,8 +306,18 @@ def _run_job(job_id: int, question: str, video_ids):
         _update_job(job_id, status="running")
         engine = get_engine()
         result = engine.answer_question(
-            question, video_ids=video_ids, emit=_make_emit(job_id)
+            question,
+            video_ids=video_ids,
+            emit=_make_emit(job_id),
+            should_cancel=lambda: _job_cancel_events.get(job_id, threading.Event()).is_set(),
         )
+        with _cancel_agent_lock:
+            was_flagged = job_id in _cancelled_agent_job_ids
+            if was_flagged:
+                _cancelled_agent_job_ids.discard(job_id)
+        if was_flagged or _should_skip_late_completion_write(job_id):
+            print(f"[ask] job_id={job_id} skip completed write (cancelled or timeout)")
+            return
         answer_json = json.dumps(
             {
                 "answer":       result.get("answer", ""),
@@ -169,8 +337,9 @@ def _run_job(job_id: int, question: str, video_ids):
             print(f"[ask_shorty] Failed to write job file {job_file}: {file_err!r}")
 
         print(f"[ask] Step F2: updating DB row for job_id={job_id}")
-        _update_job(job_id, status="completed", answer=answer_json, error=None)
-        print(f"[ask] Step F3: DB updated for job_id={job_id}, worker done")
+        ref_id = _allocate_ref_id()
+        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+        print(f"[ask] Step F3: DB updated for job_id={job_id}, worker done ref_id={ref_id}")
     except Exception as e:
         q = _job_events.get(job_id)
         if q is not None:
@@ -190,15 +359,146 @@ def _run_job(job_id: int, question: str, video_ids):
         threading.Thread(target=_cleanup, daemon=True).start()
 
 
+def _run_job_v2(job_id: int, question: str, video_ids):
+    """Background worker: Ask Shorty V2 hierarchical path only."""
+    try:
+        _update_job(job_id, status="running")
+        engine = get_engine_v2()
+        result = engine.answer(
+            question,
+            video_ids=video_ids,
+            emit=_make_emit(job_id),
+            should_cancel=lambda: _job_cancel_events.get(job_id, threading.Event()).is_set(),
+            job_id=job_id,
+        )
+        if _should_skip_late_completion_write(job_id):
+            print(f"[ask-v2] job_id={job_id} skip completed write (timeout)")
+            return
+        answer_json = json.dumps(
+            {
+                "answer":       result.get("answer", ""),
+                "used_context": result.get("used_context", []),
+                "sources":      result.get("sources", []),
+                "debug_events": result.get("debug_events", []),
+            }
+        )
+        job_file = _jobs_dir / f"{job_id}.json"
+        try:
+            job_file.write_text(answer_json, encoding="utf-8")
+        except Exception as file_err:
+            print(f"[ask_shorty] Failed to write job file {job_file}: {file_err!r}")
+        ref_id = _allocate_ref_id()
+        try:
+            from ask_shorty_v2 import v2_log_patch_ref_id
+
+            v2_log_patch_ref_id(job_id, ref_id)
+        except Exception:
+            pass
+        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+    except Exception as e:
+        q = _job_events.get(job_id)
+        if q is not None:
+            q.put({"type": "error", "message": str(e), "elapsed_ms": 0})
+        _update_job(job_id, status="error", error=str(e))
+    finally:
+        q = _job_events.get(job_id)
+        if q is not None:
+            q.put({"type": "stream_end"})
+
+        def _cleanup():
+            import time
+            time.sleep(30)
+            _job_events.pop(job_id, None)
+
+        threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def _run_agent_job(job_id: int, question: str, video_ids, conversation_history=None):
+    """Background worker: agentic tool loop (AskShorty with agent_mode=True)."""
+    try:
+        _update_job(job_id, status="running")
+        engine = get_engine()
+        result = engine.answer_question(
+            question,
+            video_ids=video_ids,
+            emit=_make_emit(job_id),
+            agent_mode=True,
+            should_cancel=lambda: _job_cancel_events.get(job_id, threading.Event()).is_set(),
+            conversation_history=conversation_history,
+        )
+        with _cancel_agent_lock:
+            was_flagged = job_id in _cancelled_agent_job_ids
+            if was_flagged:
+                _cancelled_agent_job_ids.discard(job_id)
+        if was_flagged or _should_skip_late_completion_write(job_id):
+            print(f"[agent] job_id={job_id} skip completed write (cancelled or timeout)")
+            return
+        answer_json = json.dumps(
+            {
+                "answer":       result.get("answer", ""),
+                "used_context": result.get("used_context", []),
+                "sources":      result.get("sources", []),
+                "debug_events": result.get("debug_events", []),
+            }
+        )
+        job_file = _jobs_dir / f"{job_id}.json"
+        try:
+            print(f"[agent] Step F1: writing job file for job_id={job_id} -> {job_file}")
+            job_file.write_text(answer_json, encoding="utf-8")
+            print(f"[agent] Step F1: job file written for job_id={job_id}")
+        except Exception as file_err:
+            print(f"[ask_shorty] Failed to write agent job file {job_file}: {file_err!r}")
+
+        print(f"[agent] Step F2: updating DB row for job_id={job_id}")
+        ref_id = _allocate_ref_id()
+        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+        print(f"[agent] Step F3: DB updated for job_id={job_id}, worker done ref_id={ref_id}")
+    except Exception as e:
+        q = _job_events.get(job_id)
+        if q is not None:
+            q.put({"type": "error", "message": str(e), "elapsed_ms": 0})
+        _update_job(job_id, status="error", error=str(e))
+    finally:
+        q = _job_events.get(job_id)
+        if q is not None:
+            q.put({"type": "stream_end"})
+
+        def _cleanup():
+            import time
+            time.sleep(30)
+            _job_events.pop(job_id, None)
+
+        threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def _agent_sse_enabled() -> bool:
+    return os.getenv("ASK_SHORTY_AGENT", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.route("/ask", methods=["GET"])
 def ask_page():
     return render_template("ask.html")
 
 
+@app.route("/ask_v2", methods=["GET"])
+def ask_v2_page():
+    if not _v2_flag_enabled():
+        return (
+            "<p>Ask Shorty V2 is disabled. Set <code>ASK_SHORTY_V2=true</code> in .env and restart.</p>",
+            503,
+        )
+    return render_template("ask_v2.html")
+
+
+@app.route("/agent", methods=["GET"])
+def agent_page():
+    return render_template("agent.html", agent_sse=_agent_sse_enabled())
+
+
 # ── Knowledge Observatory ─────────────────────────────────────────────────────
 
 _CLUSTERS_PATH = Path(__file__).parent / "data" / "clusters.json"
-_FULL_DB = "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
+_FULL_DB = os.environ.get("ASK_SHORTY_DB_PATH") or "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
 
 
 def _load_clusters():
@@ -223,7 +523,7 @@ def api_observatory_overview():
 
     # Pull live counts from the full corpus DB
     try:
-        conn = sqlite3.connect(_FULL_DB)
+        conn = _sqlite_connect(str(_FULL_DB))
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM videos")
         total_videos = c.fetchone()[0]
@@ -243,7 +543,7 @@ def api_observatory_overview():
 
     # Ask log count from local DB
     try:
-        conn2 = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+        conn2 = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
         c2 = conn2.cursor()
         c2.execute("SELECT COUNT(*) FROM ask_jobs WHERE status='completed'")
         ask_count = c2.fetchone()[0]
@@ -284,7 +584,7 @@ def api_observatory_timeline():
         # Fall back to raw video dates from DB
         all_videos = []
         try:
-            conn = sqlite3.connect(_FULL_DB)
+            conn = _sqlite_connect(str(_FULL_DB))
             c = conn.cursor()
             c.execute("SELECT video_id, watch_date FROM videos WHERE watch_date IS NOT NULL")
             all_videos = [{"video_id": r[0], "watch_date": r[1][:10], "cluster_id": -2}
@@ -336,10 +636,10 @@ def api_observatory_timeline():
 @app.route("/api/observatory/ask-log", methods=["GET"])
 def api_observatory_ask_log():
     try:
-        conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+        conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
         c = conn.cursor()
         c.execute("""
-            SELECT id, question, status, created_at, answer, video_ids
+            SELECT id, question, status, created_at, answer, video_ids, ref_id
             FROM ask_jobs
             ORDER BY id DESC
             LIMIT 100
@@ -351,7 +651,7 @@ def api_observatory_ask_log():
 
     result = []
     for row in rows:
-        job_id, question, status, created_at, answer_json, video_ids_json = row
+        job_id, question, status, created_at, answer_json, video_ids_json, ref_id = row
         answer_snippet = ""
         if answer_json:
             try:
@@ -365,6 +665,7 @@ def api_observatory_ask_log():
             "created_at":     created_at or "",
             "answer_snippet": answer_snippet,
             "video_ids":      json.loads(video_ids_json) if video_ids_json else None,
+            "ref_id":         ref_id or None,
         })
 
     return jsonify({"asks": result})
@@ -644,7 +945,7 @@ def api_ask():
         return jsonify({"success": False, "error": "Question is required"}), 400
 
     # Insert job row
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
@@ -661,22 +962,203 @@ def api_ask():
     # Create event queue before starting worker so the SSE client can
     # connect immediately without missing any early events.
     _job_events[job_id] = _queue.Queue()
+    _job_cancel_events[job_id] = threading.Event()
 
     # Kick off background worker
     thread = threading.Thread(target=_run_job, args=(job_id, question, video_ids), daemon=True)
     thread.start()
 
-    return jsonify({"success": True, "job_id": job_id})
+    return jsonify({"success": True, "job_id": job_id, "ref_id": None})
 
 
-@app.route("/api/ask/result/<int:job_id>", methods=["GET"])
-def api_ask_result(job_id: int):
-    print(f"[ask_jobs] Polling result for job_id={job_id}")
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+@app.route("/api/ask_v2", methods=["POST"])
+def api_ask_v2():
+    if not _v2_flag_enabled():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "ASK_SHORTY_V2 is not enabled",
+                }
+            ),
+            503,
+        )
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("question") or "").strip()
+    video_ids = data.get("video_ids") or None
+
+    if not question:
+        return jsonify({"success": False, "error": "Question is required"}), 400
+
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO ask_jobs (question, video_ids, status, created_at, updated_at)
+        VALUES (?, ?, 'pending', ?, ?)
+        """,
+        (question, json.dumps(video_ids), now, now),
+    )
+    job_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    _job_events[job_id] = _queue.Queue()
+    _job_cancel_events[job_id] = threading.Event()
+
+    thread = threading.Thread(target=_run_job_v2, args=(job_id, question, video_ids), daemon=True)
+    thread.start()
+
+    return jsonify({"success": True, "job_id": job_id, "ref_id": None})
+
+
+@app.route("/api/agent/ask", methods=["POST"])
+def api_agent_ask():
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("question") or "").strip()
+    video_ids = data.get("video_ids") or None
+    raw_history = data.get("history")
+
+    conversation_history = None
+    if isinstance(raw_history, list):
+        conversation_history = []
+        for turn in raw_history[-20:]:
+            if not isinstance(turn, dict):
+                continue
+            role = (turn.get("role") or "").strip()
+            content = (turn.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                conversation_history.append({"role": role, "content": content[:4000]})
+
+    if not question:
+        return jsonify({"success": False, "error": "Question is required"}), 400
+
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO ask_jobs (question, video_ids, status, created_at, updated_at)
+        VALUES (?, ?, 'pending', ?, ?)
+        """,
+        (question, json.dumps(video_ids), now, now),
+    )
+    job_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    _job_events[job_id] = _queue.Queue()
+    _job_cancel_events[job_id] = threading.Event()
+
+    thread = threading.Thread(
+        target=_run_agent_job,
+        args=(job_id, question, video_ids),
+        kwargs={"conversation_history": conversation_history},
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"success": True, "job_id": job_id, "ref_id": None})
+
+
+def _api_agent_cancel_impl(job_id: int):
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM ask_jobs WHERE id = ?", (job_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"success": False, "error": "Job not found", "status": "missing"}), 404
+    status = row[0]
+    if status not in ("pending", "running"):
+        return jsonify(
+            {
+                "success": False,
+                "error": "Job cannot be cancelled",
+                "status": status,
+            }
+        ), 400
+    with _cancel_agent_lock:
+        _cancelled_agent_job_ids.add(job_id)
+    ev = _job_cancel_events.get(job_id)
+    if ev is not None:
+        ev.set()
+    _update_job(job_id, status="cancelled", error="cancelled")
+    return jsonify({"success": True, "status": "cancelled", "job_id": job_id})
+
+
+@app.route("/api/agent/cancel/<int:job_id>", methods=["POST"])
+def api_agent_cancel_job(job_id: int):
+    return _api_agent_cancel_impl(job_id)
+
+
+@app.route("/api/agent/job/<int:job_id>", methods=["DELETE"])
+def api_agent_delete_job(job_id: int):
+    """Same as POST cancel (UI may use DELETE)."""
+    return _api_agent_cancel_impl(job_id)
+
+
+@app.route("/api/ask/ref/<ref_id>", methods=["GET"])
+def api_ask_by_ref(ref_id: str):
+    """Return a completed ask job by its stable ref_id (e.g. ASK-20260418-X7K2)."""
+    rid = (ref_id or "").strip()
+    if not rid:
+        return jsonify({"success": False, "error": "ref_id is required"}), 400
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT status, answer, error
+        SELECT id, status, answer, error, question, video_ids, ref_id
+        FROM ask_jobs
+        WHERE ref_id = ?
+        LIMIT 1
+        """,
+        (rid,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"success": False, "error": "Job not found", "status": "missing"}), 404
+    _jid, status, answer_json, error_text, question, video_ids_json, row_ref = row
+    if status != "completed":
+        return jsonify(
+            {
+                "success": False,
+                "status": status,
+                "error": error_text or "Job not completed",
+                "ref_id": row_ref,
+            }
+        ), 400
+    try:
+        payload = json.loads(answer_json or "{}")
+    except Exception:
+        payload = {"answer": "", "used_context": []}
+    return jsonify(
+        {
+            "success": True,
+            "status": status,
+            "job_id": _jid,
+            "ref_id": row_ref,
+            "question": question or "",
+            "video_ids": json.loads(video_ids_json) if video_ids_json else None,
+            "answer": payload.get("answer", ""),
+            "used_context": payload.get("used_context", []),
+            "sources": payload.get("sources", []),
+            "debug_events": payload.get("debug_events", []),
+        }
+    )
+
+
+@app.route("/api/ask/result/<int:job_id>", methods=["GET"])
+@app.route("/api/agent/result/<int:job_id>", methods=["GET"])
+def api_ask_result(job_id: int):
+    print(f"[ask_jobs] Polling result for job_id={job_id}")
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT status, answer, error, ref_id, updated_at
         FROM ask_jobs
         WHERE id = ?
         """,
@@ -689,14 +1171,45 @@ def api_ask_result(job_id: int):
         print(f"[ask_jobs] job_id={job_id} not found in DB")
         return jsonify({"success": False, "error": "Job not found", "status": "missing"}), 404
 
-    status, answer_json, error_text = row
+    status, answer_json, error_text, ref_id, updated_at = row
     print(f"[ask_jobs] job_id={job_id} DB status={status!r}")
 
-    # If DB doesn't show a completed answer yet, but a job file exists,
-    # treat it as completed (process likely crashed before DB write).
+    if status == "running":
+        age = _seconds_since_job_timestamp(updated_at)
+        if age is not None and age > JOB_RUNNING_TIMEOUT_SEC:
+            print(f"[ask_jobs] job_id={job_id} running timeout ({age:.0f}s) -> error")
+            # Cooperative cancel: worker checks this and stops quickly.
+            ev = _job_cancel_events.get(job_id)
+            if ev is not None:
+                ev.set()
+            _update_job(job_id, status="error", error="timeout")
+            return jsonify(
+                {
+                    "success": False,
+                    "status": "error",
+                    "error": "timeout",
+                    "ref_id": ref_id,
+                }
+            )
+
+    if status == "cancelled":
+        return jsonify(
+            {
+                "success": False,
+                "status": "cancelled",
+                "error": "cancelled",
+                "ref_id": ref_id,
+            }
+        )
+
+    # If the worker crashed after writing the JSON file but before updating
+    # SQLite, the row can be left as "error". Only then read the job file —
+    # never when status is still "pending" or "running", or a stale file from
+    # an earlier run (same job_id) can be mistaken for the current job.
     job_file = _jobs_dir / f"{job_id}.json"
     print(f"[ask_jobs] job_id={job_id} job_file={job_file} exists={job_file.exists()}")
-    if status in ("pending", "running", "error") and job_file.exists():
+    err_lower = (error_text or "").strip().lower()
+    if status == "error" and job_file.exists() and err_lower != "timeout":
         try:
             file_json = job_file.read_text(encoding="utf-8")
             payload = json.loads(file_json or "{}")
@@ -704,12 +1217,15 @@ def api_ask_result(job_id: int):
             payload = {"answer": "", "used_context": []}
         # Best-effort to sync DB state, but even if this fails we still return
         try:
+            sync_ref = _allocate_ref_id()
             _update_job(
                 job_id,
                 status="completed",
                 answer=file_json,
                 error=None,
+                ref_id=sync_ref,
             )
+            ref_id = sync_ref
         except Exception as sync_err:
             print(f"[ask_shorty] Failed to sync job {job_id} from file to DB: {sync_err!r}")
         resp = {
@@ -718,35 +1234,57 @@ def api_ask_result(job_id: int):
             "answer": payload.get("answer", ""),
             "used_context": payload.get("used_context", []),
             "sources": payload.get("sources", []),
+            "ref_id": ref_id,
         }
         print(f"[ask_jobs] job_id={job_id} returning completed (from file)")
         return jsonify(resp)
 
     if status in ("pending", "running"):
         print(f"[ask_jobs] job_id={job_id} still {status}, continuing to poll")
-        return jsonify({"success": False, "status": status})
+        return jsonify({"success": False, "status": status, "ref_id": ref_id})
 
     if status == "completed":
+        raw = answer_json or "{}"
         try:
-            payload = json.loads(answer_json or "{}")
-        except Exception:
-            payload = {"answer": "", "used_context": []}
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("answer JSON is not an object")
+        except Exception as parse_exc:
+            print(f"[ask_jobs] job_id={job_id} invalid completed answer JSON: {parse_exc!r}")
+            payload = {
+                "answer": (
+                    "Something went wrong reading this answer from storage (invalid or incomplete data). "
+                    "Please run your question again."
+                ),
+                "used_context": [],
+                "sources": [],
+                "debug_events": [],
+            }
         resp = {
             "success": True,
             "status": status,
             "answer": payload.get("answer", ""),
             "used_context": payload.get("used_context", []),
             "sources": payload.get("sources", []),
+            "ref_id": ref_id,
         }
         print(f"[ask_jobs] job_id={job_id} returning completed (from DB)")
         return jsonify(resp)
 
-    # status == "error" and no file fallback
+    # status == "error" and no file fallback (HTTP 200 so clients read JSON and stop polling)
     print(f"[ask_jobs] job_id={job_id} returning error: {error_text!r}")
-    return jsonify({"success": False, "status": status, "error": error_text or "Unknown error"}), 500
+    return jsonify(
+        {
+            "success": False,
+            "status": status,
+            "error": error_text or "Unknown error",
+            "ref_id": ref_id,
+        }
+    )
 
 
 @app.route("/api/ask/stream/<int:job_id>", methods=["GET"])
+@app.route("/api/agent/stream/<int:job_id>", methods=["GET"])
 def api_ask_stream(job_id: int):
     """Server-Sent Events stream for real-time pipeline debug output."""
 
@@ -778,10 +1316,233 @@ def api_ask_stream(job_id: int):
     )
 
 
+@app.route("/review/<video_id>", methods=["GET"])
+def review_video(video_id: str):
+    """Readable single-video review page for generated artifacts + transcript."""
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            v.title,
+            v.channel,
+            v.watch_date,
+            t.shorty,
+            t.text
+        FROM videos v
+        LEFT JOIN transcripts t ON t.video_id = v.video_id
+        WHERE v.video_id = ?
+        ORDER BY t.created_at DESC
+        LIMIT 1
+        """,
+        (video_id,),
+    )
+    row = cursor.fetchone()
+    if row:
+        title, channel, watch_date, shorty, transcript_text = row
+    else:
+        conn.close()
+        return render_template(
+            "review_video.html",
+            found=False,
+            video_id=video_id,
+            title=None,
+            channel=None,
+            watch_date=None,
+            shorty=None,
+            questions=[],
+            entity_groups={},
+            facts=[],
+            transcript_text=None,
+            bookmarklet_href="",
+        )
+
+    cursor.execute(
+        """
+        SELECT question
+        FROM synthetic_questions
+        WHERE video_id = ?
+        ORDER BY created_at ASC
+        """,
+        (video_id,),
+    )
+    questions = [r[0] for r in cursor.fetchall() if (r[0] or "").strip()]
+
+    cursor.execute(
+        """
+        SELECT name, type, aliases
+        FROM entities
+        WHERE video_id = ?
+        ORDER BY name ASC
+        """,
+        (video_id,),
+    )
+    entity_rows = cursor.fetchall()
+
+    cursor.execute(
+        """
+        SELECT subject, relation, object
+        FROM facts
+        WHERE video_id = ?
+        ORDER BY id ASC
+        """,
+        (video_id,),
+    )
+    facts = [
+        {
+            "subject": (s or "").strip(),
+            "relation": (r or "").strip(),
+            "object": (o or "").strip(),
+        }
+        for (s, r, o) in cursor.fetchall()
+        if (s or "").strip() and (r or "").strip() and (o or "").strip()
+    ]
+    conn.close()
+
+    entity_groups = {
+        "person": [],
+        "organization": [],
+        "location": [],
+        "concept": [],
+    }
+    for name, raw_type, aliases_json in entity_rows:
+        n = (name or "").strip()
+        if not n:
+            continue
+        t = (raw_type or "").strip().lower()
+        if t not in entity_groups:
+            t = "concept"
+        try:
+            aliases_val = json.loads(aliases_json) if aliases_json else []
+            if not isinstance(aliases_val, list):
+                aliases_val = []
+        except Exception:
+            aliases_val = []
+        aliases = [str(a).strip() for a in aliases_val if str(a).strip()]
+        entity_groups[t].append({"name": n, "aliases": aliases})
+
+    bookmarklet_href = (
+        "javascript:(function(){var u=location.href,m=u.match(/[?&]v=([a-zA-Z0-9_-]{11})/)"
+        "||u.match(/youtu\\.be\\/([a-zA-Z0-9_-]{11})/)"
+        "||u.match(/\\/shorts\\/([a-zA-Z0-9_-]{11})/);"
+        "if(!m){alert('No YouTube video ID found in URL.');return;}"
+        "window.open('http://localhost:5001/review/'+m[1],'_blank');})();"
+    )
+
+    return render_template(
+        "review_video.html",
+        found=True,
+        video_id=video_id,
+        title=title,
+        channel=channel,
+        watch_date=watch_date,
+        shorty=shorty,
+        questions=questions,
+        entity_groups=entity_groups,
+        facts=facts,
+        transcript_text=transcript_text,
+        bookmarklet_href=bookmarklet_href,
+    )
+
+
+@app.route("/pending-review", methods=["GET"])
+def pending_review():
+    """Management page for pending shorty queue rows."""
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT DISTINCT
+            pq.video_id,
+            COALESCE(v.channel, '') AS channel,
+            COALESCE(v.title, '') AS title
+        FROM processing_queue pq
+        LEFT JOIN videos v ON v.video_id = pq.video_id
+        WHERE pq.task = 'shorty' AND pq.status = 'pending'
+        ORDER BY channel ASC, title ASC, pq.video_id ASC
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    items = []
+    for video_id, channel, title in rows:
+        ad_flag = False
+        if _looks_like_ad and _AdPendingVideo:
+            try:
+                ad_flag, _ = _looks_like_ad(
+                    _AdPendingVideo(video_id=video_id, title=title, channel=channel)
+                )
+            except Exception:
+                ad_flag = False
+        items.append(
+            {
+                "video_id": video_id,
+                "channel": channel,
+                "title": title,
+                "ad_flag": bool(ad_flag),
+            }
+        )
+
+    return render_template("pending_review.html", videos=items)
+
+
+@app.route("/api/pending-review/skip", methods=["POST"])
+def api_pending_review_skip():
+    """Mark pending shorty queue rows as permanently_failed for provided video IDs."""
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("video_ids")
+    if not isinstance(raw_ids, list):
+        return jsonify({"success": False, "error": "video_ids must be a list"}), 400
+
+    video_ids = []
+    for v in raw_ids:
+        s = str(v).strip()
+        if s:
+            video_ids.append(s)
+    # preserve order, remove duplicates
+    seen = set()
+    video_ids = [v for v in video_ids if not (v in seen or seen.add(v))]
+
+    if not video_ids:
+        return jsonify({"success": True, "updated_rows": 0, "video_count": 0})
+
+    placeholders = ",".join("?" for _ in video_ids)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    reason = "Skipped from /pending-review"
+
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        UPDATE processing_queue
+        SET status = 'permanently_failed',
+            completed_at = ?,
+            error = ?
+        WHERE task = 'shorty'
+          AND status = 'pending'
+          AND video_id IN ({placeholders})
+        """,
+        [now, reason, *video_ids],
+    )
+    updated = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    return jsonify(
+        {
+            "success": True,
+            "updated_rows": int(updated),
+            "video_count": len(video_ids),
+        }
+    )
+
+
 @app.route("/debug/videos", methods=["GET"])
 def debug_videos():
     """List videos and whether they have Shorties, questions, and entities."""
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
 
     cursor.execute(
@@ -822,7 +1583,7 @@ def debug_videos():
 @app.route("/debug/video/<video_id>", methods=["GET"])
 def debug_video(video_id: str):
     """Show Shorty, synthetic questions, and entities for a single video."""
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
 
     cursor.execute(

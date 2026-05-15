@@ -56,7 +56,10 @@ Rules:
 - Prefer specific, concrete entities important to the video.
 - Merge clear aliases into one entity.
 - Include people, organizations, products, software, protocols, locations, concepts.
-- Output MUST start with [ and end with ]. Nothing else."""
+- Output MUST start with [ and end with ]. Nothing else.
+- Every array element MUST be an object with keys "name", "type", "aliases" only.
+- Do NOT return arrays of strings, test logs, tables, or other JSON shapes (no drop_test_number, outcome, etc.).
+- Do NOT put JSON inside a string inside the array."""
 
 ENTITY_JSON_USER_TEMPLATE = """Extract entities from this transcript.
 
@@ -238,17 +241,24 @@ def extract_entities(transcript_text: str, title: Optional[str] = None) -> List[
     return _call_claude_entities(ENTITY_SYSTEM_PROMPT, user_prompt)
 
 
-def store_entities(video_id: str, entities: List[Dict[str, Any]]) -> int:
+def store_entities(
+    video_id: str,
+    entities: List[Dict[str, Any]],
+    db: Optional[TranscriptDatabase] = None,
+) -> int:
     """
     Store entities into the SQLite `entities` table.
+
+    Pass ``db`` when using ``batch_processor --db-path`` so entities land in the
+    same database as Shorties. If omitted, uses default ``TranscriptDatabase()``.
 
     Returns the number of entities stored.
     """
     if not entities:
         return 0
 
-    db = TranscriptDatabase()
-    conn = sqlite3.connect(db.db_path)  # type: ignore[attr-defined]
+    db_obj = db if db is not None else TranscriptDatabase()
+    conn = sqlite3.connect(db_obj.db_path)  # type: ignore[attr-defined]
     cursor = conn.cursor()
 
     count = 0

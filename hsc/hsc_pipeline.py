@@ -32,9 +32,24 @@ def process_video_hsc(db: TranscriptDatabase, video_id: str) -> Dict[str, Any]:
     shorty = (info.get("shorty") or "").strip()
     vinfo = db.get_video_info(video_id) or {}
     title = (vinfo.get("title") or video_id) if isinstance(vinfo, dict) else video_id
+    meta = (vinfo.get("metadata") or {}) if isinstance(vinfo, dict) else {}
+    dur_sec = None
+    if isinstance(meta, dict):
+        try:
+            d0 = float(meta.get("duration") or 0)
+            if d0 > 0:
+                dur_sec = d0
+        except (TypeError, ValueError):
+            dur_sec = None
 
     # Segments
-    seg_list = extract_segments(text, timestamps=None)
+    seg_list = extract_segments(
+        text,
+        timestamps=None,
+        duration_seconds=dur_sec,
+        title=title,
+        chat_fn=None,
+    )
     rows = [
         {
             "start_time": s.get("start_time"),

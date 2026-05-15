@@ -307,7 +307,10 @@ class TranscriptDatabase:
             )
 
             conn.commit()
-            print(f"[OK] Transcript database ready: {self.db_path}")
+            print(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"[OK] Transcript database ready: {self.db_path}"
+            )
 
     def add_video(self, video_id: str, title: str, channel: str, url: str) -> bool:
         """Add a video to the database.

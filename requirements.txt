@@ -1,0 +1,7 @@
+python-dotenv>=1.0.0
+chromadb>=0.4.22
+sentence-transformers>=2.2.0
+torch
+numpy
+rank-bm25
+nltk>=3.8

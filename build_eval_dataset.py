@@ -62,13 +62,6 @@ _KNOWN_DB_CANDIDATES: List[Path] = [
     Path(__file__).parent / "data" / "transcripts.db",
 ]
 
-# Companion Chroma paths (paired with the DB candidates above).
-_KNOWN_CHROMA_CANDIDATES: List[Optional[Path]] = [
-    Path.home() / "Desktop" / "youtube-history-viewer-copy" / "data" / "transcript_chroma",
-    Path(__file__).parent / "data" / "transcript_chroma_new",
-]
-
-
 def find_best_db(explicit: Optional[str] = None) -> Path:
     """
     Return the best available transcripts.db path.
@@ -94,15 +87,22 @@ def find_best_db(explicit: Optional[str] = None) -> Path:
 
 
 def find_companion_chroma(db_path: Path, explicit: Optional[str] = None) -> Optional[Path]:
-    """Return the Chroma path that accompanies db_path, or None."""
+    """
+    Return the Chroma directory beside ``transcripts.db``, or None.
+
+    Prefer ``transcript_chroma_new`` (used by ``reindex_all.py`` and
+    ``batch_processor``) over legacy ``transcript_chroma`` so eval and Ask use
+    the same index that actually contains Shorty / synthetic_question vectors.
+    """
     if explicit:
         p = Path(explicit)
         return p if p.exists() else None
 
-    for db_cand, chroma_cand in zip(_KNOWN_DB_CANDIDATES, _KNOWN_CHROMA_CANDIDATES):
-        if chroma_cand and db_path.resolve() == db_cand.resolve():
-            return chroma_cand if chroma_cand.exists() else None
-
+    parent = db_path.resolve().parent
+    for dirname in ("transcript_chroma_new", "transcript_chroma"):
+        cand = parent / dirname
+        if cand.is_dir():
+            return cand
     return None
 
 

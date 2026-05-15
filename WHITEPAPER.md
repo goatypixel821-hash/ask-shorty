@@ -11,242 +11,219 @@ Typical “RAG over transcripts” systems run into several problems:
 - **Recall failures** – even with good embeddings, important details (numbers, names, versions, dates) are easy to miss when they appear only once in hours of speech.
 - **Scaling limits** – storing and searching only raw text chunks becomes expensive and slow as libraries grow.
 
-Ask Shorty was built from a practical need: searching a personal YouTube watch history and being able to ask, “Where did I hear X?” and “What exactly did they say about Y?” without re‑watching entire videos. What emerged is a more general, research‑grade component: a dense, machine‑oriented compression layer that sits alongside traditional RAG and dramatically improves recall.
+Ask Shorty was built from a practical need: searching a personal YouTube watch history and being able to ask, “Where did I hear X?” and “What exactly did they say about Y?” without re‑watching entire videos. The central bet is a **dense, machine‑oriented compression layer** (the **Shorty**) that sits **alongside** chunk‑based RAG, plus optional structured artifacts (entities, synthetic questions, triples) and hybrid retrieval (dense + keyword + graph) where enabled.
 
 ## 2. Core Idea: The Shorty
 
-At the center of Ask Shorty is the **Shorty**: a dense, structured compression of a single transcript optimized for LLM consumption rather than human readability.
+At the center of Ask Shorty is the **Shorty**: a dense compression of a single transcript aimed at **retrieval and downstream LLM use**, not polished human prose.
 
-A Shorty is:
+Design targets (not guaranteed metrics unless separately measured on a benchmark):
 
-- A 90–97% token reduction of the original transcript.
-- Designed to retain ~95% of answerable information: entities, numbers, causal chains, “micro‑details”, and key claims.
-- Stored as a separate field (`transcripts.shorty`) in SQLite and optionally vectorized into Chroma as its own document type.
+- **Roughly 90–97% fewer tokens** than the raw transcript for the same video.
+- **High retention of answer‑relevant signal**: entities, numbers, causal chains, “micro‑details,” and key claims—stated in prompts as a **quality goal**, not a formal proof of “~95% information retention.”
 
-Shorties are not conventional summaries. They aim to be lossy for humans but near‑lossless for LLMs:
+Implementation:
 
-- Preserve all entities (people, organizations, systems).
-- Preserve all important numbers (dates, counts, sizes, versions).
-- Preserve relationships and causal chains (who did what to what, and what happened).
-- Separate facts from commentary/interpretation.
-- Include a small **MICRO‑DETAILS** section for hard‑to‑recover but important details (software names, model names, specific legal terms, etc.).
+- Stored in SQLite as **`transcripts.shorty`** (see `transcript_database.py`).
+- Indexed into Chroma as documents with metadata **`type="shorty"`**, one per video, in addition to transcript **chunks** and **synthetic questions**.
 
-In practice, a Shorty acts as a semantic index for the entire transcript: an LLM reading only the Shorty can answer most questions that could be answered from the original video.
+Shorties are not conventional summaries. The intended properties are:
+
+- Preserve salient entities (people, organizations, systems).
+- Preserve important numbers (dates, counts, sizes, versions).
+- Preserve relationships and causal chains where the model follows the Shorty prompt.
+- Optionally surface **MICRO‑DETAILS** (or equivalent sections in the prompt) for rare but important strings (product names, legal terms, etc.).
+
+**Role relative to chunks:** Shorties **do not replace** chunk RAG. They provide a **whole‑video semantic surface** so a single embedding (or a small text) can match queries about “what this video is about” without relying on the one chunk that happened to contain the answer.
 
 ## 3. System Overview
 
-### 3.1 High‑Level Flow
+### 3.1 Ingest
 
-Ask Shorty turns videos into queryable knowledge objects through the following pipeline:
+- A browser bookmarklet and **`video_grabber.py`** / **`start_grabber.py`** capture YouTube URLs and transcript text (e.g. **`youtube-transcript-api`**, **`simple_transcript_fetcher.py`**).
+- Metadata and transcripts are stored in **SQLite** (`videos`, `transcripts`).
 
-**Ingest**
+### 3.2 Enqueue and batch processing
 
-- A browser bookmarklet (grabber service) captures a YouTube URL and uses `simple_transcript_fetcher.py` plus `youtube-transcript-api` to fetch the transcript.
-- Metadata and transcripts are stored in SQLite (`videos`, `transcripts`).
+- **`enqueue_backfill.py`** finds work to do (e.g. videos with transcripts missing Shorties, or specific **task** types such as **`triples`**) and inserts rows into **`processing_queue`**.
+- **`batch_processor.py`** runs in **queue mode** (`--queue`, default): it **atomically claims** pending rows, runs the appropriate LLM or extraction step, and updates **`status`** (`pending` → `started` → `completed` or `failed`). Optional filters: **`--only-tasks`**, **`--exclude-tasks`** (e.g. one worker for everything except triples, another for **`triples` only**).
+- Providers: **`--provider anthropic`** (default) or **`--provider openai-compatible`** with **`--base-url`** and **`--model`** for local or hosted OpenAI‑compatible endpoints.
+- **Important:** In queue mode, **Chroma indexing is decoupled** from the hot path (some Chroma paths have been problematic for long‑running workers). After bulk LLM work, run **`reindex_all.py`** (or equivalent) to refresh vectors from SQLite.
 
-**Enqueue processing**
+**Typical queue `task` values** (see schema):
 
-- `enqueue_backfill.py` scans for videos with transcripts but no Shorty and enqueues three tasks per video in `processing_queue`: `shorty`, `synthetic_questions`, `entities`.
+- **`shorty`** – generate or refresh Shorty text.
+- **`synthetic_questions`** – generate stored questions for question–question matching.
+- **`entities`** – extract structured entities.
+- **`triples`** – extract **subject → relation → object** rows from the Shorty (and persist to **`facts`**).
+- **`segments`** / **`events`** – optional **HSC** (Hierarchical Semantic Compression) artifacts when that pipeline is used.
 
-**Generate Shorty, synthetic questions, and entities**
+### 3.3 Indexing for retrieval
 
-- `batch_processor.py` (queue mode) processes tasks using Anthropic or an OpenAI‑compatible API:
-  - `shorty_generator.py` creates the Shorty and synthetic questions via LLM.
-  - `entity_extractor.py` extracts entities via either Anthropic tool‑use or a JSON‑only OpenAI‑compatible path.
-- Results are written back into SQLite (`transcripts.shorty`, `synthetic_questions`, `entities`).
-- In legacy batch mode, the same script can also index vectors in Chroma, but in queue mode Chroma reindexing is decoupled to avoid `os._exit` issues.
+- **`transcript_rag_enhanced.py`** (exported as **`TranscriptRAG`**) chunks transcripts and writes **Chroma** documents with embeddings from **`all-MiniLM-L6-v2`** (default). Metadata **`type`** is one of **`chunk`**, **`shorty`**, **`synthetic_question`** (and additional types if extended).
+- **Chroma directory** defaults next to the DB (e.g. **`transcript_chroma_new`** beside an external **`transcripts.db`**); configurable via constructor args / env.
+- **`bm25_index.py`** builds a **BM25** keyword index over the same logical documents (chunks, Shorties, entity strings, etc.) for hybrid retrieval. The index path is derived from the DB path.
 
-**Index for retrieval**
+### 3.4 Query and answer
 
-- `transcript_rag_enhanced.py` handles chunking and indexing into Chroma (path `data/transcript_chroma`).
-- Three main vector types share one collection (`transcripts`, cosine distance):
-  - Transcript chunks (`type="chunk"`, with `video_id`, `chunk_index`).
-  - Shorties (`type="shorty"`, one per video).
-  - Synthetic questions (`type="synthetic_question"`).
+- **`ask_shorty.py`** implements the main **Ask** pipeline (used by **`ask_shorty_app.py`**).
+- **Baseline path:** metadata filtering (channel / date → candidate **`video_id`**s), **query rewriting** (Claude → multiple query strings), **multi‑representation vector search** over Chroma (chunks + Shorties + synthetic questions), context assembly, **Claude** answer with citations.
+- **Optional extensions** (controlled by **environment variables**, see §5.5):
+  - **BM25** + **Reciprocal Rank Fusion (RRF)** with dense hits.
+  - **Graph retrieval** over **`facts`** (**`graph_search.py`**).
+  - **Cross‑encoder reranking** (**`reranker.py`**).
+  - **HSC** routing and extra segment/event retrieval (**`hsc/`**).
 
-**Query and answer**
+### 3.5 UIs and tooling
 
-- `ask_shorty.py` receives a user query (via Flask app `ask_shorty_app.py`).
-- It optionally parses the question for channel/date filters, narrowing candidate `video_id`s via SQLite (`TranscriptDatabase`).
-- A query rewriting step uses Claude to generate multiple alternate phrasings.
-- It performs multi‑angle retrieval over Chroma: chunks, Shorties, synthetic questions, optionally filtered by `video_id`.
-- Retrieved context is assembled and passed to Claude for the final answer, with citations back to videos/chunks.
-
-**Browse and debug**
-
-- `library_app.py` provides a simple UI for browsing videos, inspecting their Shorties, synthetic questions, and entities, and manually enqueueing processing tasks.
-- SQLite (`data/transcripts.db`) is the source of truth; Chroma is a derived index that can be rebuilt from SQLite when needed.
+- **Ask UI** – **`ask_shorty_app.py`** (e.g. **`/ask`**).
+- **Library / admin** – **`library_app.py`**.
+- **Knowledge explorer** – templates / routes for graph and facts browsing (see repo).
+- **Progress** – **`check_progress.py`** (`--db-path`): queue and triples (**`facts`**) counts.
+- **Queue hygiene** – **`reset_stale.py`** (reset orphaned **`started`** rows to **`pending`**), **`reset_failed.py`** (retry **`failed`**).
 
 ## 4. Data Model
 
-### 4.1 SQLite Schema
+### 4.1 SQLite (canonical store)
 
-Key tables in `transcript_database.py`:
+Defined and migrated in **`transcript_database.py`**. Principal tables:
 
-- **videos**
-  - `video_id` (PK), `title`, `channel`, `url`, `has_transcript`, `transcript_fetched_at`, `watch_date`, `local_path`, `json_metadata`, `created_at`.
-- **transcripts**
-  - `id`, `video_id`, `text`, `language`, `confidence`, `shorty`, `shorty_generated_at`, `created_at`.
-  - Shorty lives here, not in `videos`.
-- **entities**
-  - `id`, `video_id`, `name`, `type`, `aliases` (JSON string array), `created_at`.
-- **synthetic_questions**
-  - `id`, `video_id`, `question`, `embedding_id`, `created_at`.
-- **processing_queue**
-  - `id`, `video_id`, `task` (`shorty` \| `synthetic_questions` \| `entities`), `status` (`pending` \| `started` \| `completed` \| `failed`), timestamps, and `error`.
+| Table | Role |
+|--------|------|
+| **videos** | `video_id` (PK), title, channel, url, watch metadata, etc. |
+| **transcripts** | Full transcript text; **`shorty`**, **`shorty_generated_at`**. |
+| **entities** | Per‑video entities with **`name`**, **`type`**, **`aliases`** (JSON). |
+| **synthetic_questions** | Per‑video generated questions for retrieval. |
+| **facts** | Per‑video **triples**: subject, relation, object (+ optional confidence / source). |
+| **global_facts** | Normalized cross‑video fact store for graph‑scale views (rebuilt from per‑video facts as configured). |
+| **fact_nodes**, **fact_edges**, **fact_frequency_meta** | Graph salience / structure around facts. |
+| **entity_alias** | Alias normalization for graph and search. |
+| **global_graph_meta** | Bookkeeping for global graph rebuilds. |
+| **segments**, **events** | HSC‑style structured summaries when generated. |
+| **processing_queue** | **`task`**, **`status`** (`pending`, `started`, `completed`, `failed`, `permanently_failed`), timestamps, **`error`**, **`attempts`**. |
 
-This schema supports both batch and interactive workflows and makes it easy to rebuild derived indexes.
+SQLite is the **source of truth**; Chroma and BM25 are **derived** and can be rebuilt.
 
-### 4.2 Chroma Index
+### 4.2 Chroma
 
-Chroma is used as a vector index under `data/transcript_chroma` with a single `transcripts` collection (cosine distance).
+- Collection **`transcripts`**, cosine similarity.
+- Documents tagged by **`type`** and **`video_id`**; chunks include **`chunk_index`**.
 
-Each record includes:
+### 4.3 BM25
 
-- **embedding** – from SentenceTransformer `all-MiniLM-L6-v2`.
-- **metadata** – at minimum:
-  - `type` ∈ { `"chunk"`, `"shorty"`, `"synthetic_question"` }.
-  - `video_id`.
-  - `chunk_index` (for `chunk` only).
-
-This design enables multi‑representation retrieval: the same video is represented as many chunks, one Shorty, and many synthetic questions.
+- On‑disk index (see **`bm25_index.py`**) built from the same corpus family as vectors, enabling **exact token / name / acronym** matching that dense models often miss.
 
 ## 5. Retrieval Pipeline
 
-Ask Shorty’s query pipeline is designed to improve recall and robustness by combining several techniques.
+### 5.1 Metadata filtering
 
-### 5.1 Metadata Filtering
+Narrows **`video_id`** candidates when the question implies channel or date constraints (SQLite queries in **`ask_shorty.py`** / **`TranscriptDatabase`**).
 
-Before vector search, `ask_shorty.py` can parse a question for channel/date constraints and use SQLite to restrict the set of candidate `video_id`s. This avoids searching the entire corpus when the user implicitly references a specific channel or time window.
+### 5.2 Query rewriting
 
-### 5.2 Query Rewriting
+Claude generates **3–4 alternate phrasings** (JSON array of strings); each feeds retrieval, improving recall under lexical and semantic variation.
 
-A single natural language question is often ambiguous or under‑specified. Ask Shorty therefore uses Claude with tool‑use to generate multiple alternate phrasings of the user query (typically 3–4). These rewrites capture:
+### 5.3 Multi‑representation dense retrieval
 
-- Different synonyms and formulations.
-- Explicit mention of channels, people, or systems inferred from context.
-- Variants that match how synthetic questions were phrased at index time.
+For each rewrite, search Chroma for:
 
-Each rewrite is used as a separate query into Chroma.
+- **`shorty`** – whole‑video compressed signal.
+- **`synthetic_question`** – question–question alignment.
+- **`chunk`** – local evidence and exact wording.
 
-### 5.3 Multi‑Representation Retrieval
+Hits are merged and ranked (with optional RRF and reranking as below).
 
-For each rewritten query, Ask Shorty queries Chroma three times:
+### 5.4 Answer synthesis
 
-- **Shorty hits** (`type="shorty"`)
-  - Identify which videos are globally relevant to the question.
-  - Provide high‑density, whole‑video context.
-- **Synthetic question hits** (`type="synthetic_question"`)
-  - Match the user’s question against questions that were generated from the transcript at index time.
-  - This is conceptually similar to “hypothetical question indexing”: matching question‑to‑question rather than question‑to‑raw text.
-- **Chunk hits** (`type="chunk"`)
-  - Retrieve local transcript segments that contain exact phrases, quotes, or detailed steps.
+Top Shorties, synthetic questions, and chunks are packed into a prompt; **Claude** produces the final answer with **video / channel / watch‑date** style citations per system prompt rules.
 
-The results are merged and ranked by similarity (and potentially by type‑specific weights), yielding a small set of videos and chunks with strong evidence for answering the question.
+### 5.5 Optional layers (feature flags)
 
-### 5.4 Answer Synthesis
+Set in the environment for **`ask_shorty.py`**:
 
-Ask Shorty then composes a context block including:
+| Variable | Effect |
+|----------|--------|
+| **`ASK_SHORTY_BM25=1`** | BM25 search; fused with dense lists via **RRF**. |
+| **`ASK_SHORTY_GRAPH=1`** | Retrieval signals from **`facts`** via **`GraphSearch`**. |
+| **`ASK_SHORTY_RERANK=1`** | Second‑stage **CrossEncoder** reranking over candidate groups. |
+| **`ASK_SHORTY_HSC=1`** | HSC‑style routing and segment/event use where implemented. |
 
-- Excerpts from the top Shorties (for global structure).
-- The most relevant synthetic questions (to show why a video answers this query).
-- Selected transcript chunks (for quotes and fine detail).
+Defaults are conservative (often **off**) for latency and dependency cost; **BM25 in particular** has shown strong gains on **keyword‑sensitive** and **cross‑video** style queries in internal **`evaluate_rag.py`** runs when the index is built and the flag is on.
 
-This aggregated context is sent to Claude, which produces the final answer with references/citations back to the underlying videos and segments.
+### 5.6 Evaluation
 
-By treating Shorties and synthetic questions as first‑class retrieval targets, Ask Shorty avoids many of the recall problems of pure chunk‑based RAG, especially for long, meandering transcripts.
+- **`evaluate_rag.py`** supports **baseline** and other modes, reporting **Recall@K**, **MRR**, **NDCG**, and optional answer metrics.
+- **Empirical caveat:** On a fixed golden set, **within‑video “specific fact”** retrieval can reach very high recall when the right chunk exists; **cross‑video** retrieval remains harder for **dense‑only** configurations. **BM25 + fusion** often improves **cross‑video** recall when queries share surface forms with indexed text. Results depend on **corpus coverage**, **index freshness**, and **flags**—the README’s “five‑layer” story should be read as **capability when enabled and tuned**, not a single default code path.
 
 ## 6. Design Rationale
 
-### 6.1 Why Dense Compression?
+### 6.1 Why dense compression (Shorty)?
 
-Storing only raw transcript chunks leads to several failure modes:
+Mitigates **dilution** of embeddings across noisy chunks and **splits** across chunk boundaries for global questions. It is the **primary architectural bet** of Ask Shorty.
 
-- **Concept dilution:** embeddings dominated by filler conversation rather than key facts.
-- **Missing causal chains:** causes and consequences appear in different chunks.
-- **Poor long‑range recall:** questions about “overall argument” or “big picture” are difficult when each chunk is narrow.
+### 6.2 Why multi‑representation retrieval?
 
-Shorties address this by packing entities + numbers + causal chains + micro‑details into a single dense representation per video. This makes it easy for both LLMs and the vector index to grasp “what this video is about” in a small token budget.
+Chunks excel at **local** evidence; Shorties at **global** video semantics; synthetic questions at **intent** overlap. Together they reduce single‑representation blind spots.
 
-### 6.2 Why Multi‑Representation Retrieval?
+### 6.3 Why triples and graph tables?
 
-Different representations support different query types:
+Structured **subject–relation–object** rows support **browsing**, **graph search**, and future **multi‑hop** reasoning. Quality depends on LLM extraction and normalization; they are **add‑ons** that compound with good Shorties, not a substitute for them.
 
-| Layer              | Strength                                      |
-|--------------------|-----------------------------------------------|
-| Transcript chunks  | Exact phrasing, local detail                  |
-| Shorty             | Global structure, cross‑chunk relationships   |
-| Synthetic questions| Question‑to‑question matching, helps ambiguity|
+### 6.4 Why SQLite + derived indexes?
 
-Indexing all three and searching across them significantly improves recall compared to RAG that only uses chunks.
+Inspectability, durability, and simple **rebuild** loops (queue → SQLite → **`reindex_all.py`** → Chroma/BM25).
 
-### 6.3 Why SQLite as Source of Truth?
+### 6.5 Why a queue?
 
-Ask Shorty uses SQLite (`data/transcripts.db`) as the canonical store for all semantic artifacts (transcripts, Shorties, entities, synthetic questions), with Chroma as a derived index. This has several benefits:
-
-- Easy to inspect and debug via standard SQL tools.
-- Robust against vector index failures or format changes.
-- Enables offline or batch reindexing scripts (for example, `reindex_all.py`) that rebuild Chroma from SQLite when needed.
-
-### 6.4 Why a Queue‑Based Batch Processor?
-
-Shorties and synthetic questions are relatively expensive to generate. Ask Shorty uses `processing_queue` and `batch_processor.py` in queue mode to process them asynchronously:
-
-- New videos can be ingested quickly without blocking on LLM calls.
-- Failed tasks can be retried and audited.
-- Chroma reindexing is kept out of the queue loop because some Chroma code paths call `os._exit`, which can terminate the whole worker; instead, reindexing is handled in separate scripts.
+LLM generation is slow and failure‑prone; **`processing_queue`** enables **resume**, **retry**, **parallel workers** with **`only-tasks` / `exclude-tasks`**, and clear **operations** (progress scripts, stale reset).
 
 ## 7. Implementation Notes
 
-### 7.1 Key Components
+### 7.1 Key modules (non‑exhaustive)
 
-- `transcript_database.py` – SQLite schema, migrations, and enqueue helpers.
-- `shorty_generator.py` – LLM client for generating Shorty and synthetic questions.
-- `entity_extractor.py` – entity extraction via Anthropic tool‑use or OpenAI‑compatible JSON path.
-- `transcript_rag.py` / `transcript_rag_enhanced.py` – chunking logic and Chroma integration.
-- `batch_processor.py` – queue and legacy batch modes for generating Shorties, synthetic questions, and entities.
-- `enqueue_backfill.py` – backfill script to enqueue processing tasks for existing transcripts.
-- `video_grabber.py` / `start_grabber.py` – bookmarklet‑driven ingest service.
-- `ask_shorty.py` – query pipeline (rewrite, retrieval, answer).
-- `ask_shorty_app.py` – simple Flask UI for asking questions.
-- `library_app.py` – admin/library UI to browse videos and their Shorties/entities/questions.
+| Module | Role |
+|--------|------|
+| **`transcript_database.py`** | Schema, migrations, CRUD, queue helpers, facts API. |
+| **`shorty_generator.py`** | Shorty + synthetic question prompts (Anthropic path). |
+| **`entity_extractor.py`** | Anthropic tool‑use or OpenAI‑compatible JSON parsing. |
+| **`triple_extractor.py`** | Triple extraction from Shorties (OpenAI‑compatible path in batch). |
+| **`transcript_rag_enhanced.py`** | Chunking, Chroma indexing, hybrid vector search. |
+| **`bm25_index.py`** | BM25 build/search, RRF helpers. |
+| **`graph_search.py`** | Query **`facts`** for retrieval hints. |
+| **`reranker.py`** | Cross‑encoder reranking. |
+| **`hsc/`** | Segments, events, routing, global graph helpers. |
+| **`ask_shorty.py`** | End‑to‑end Ask pipeline and feature flags. |
+| **`batch_processor.py`** | Queue and legacy batch processing. |
+| **`enqueue_backfill.py`** | Enqueue backfill jobs. |
+| **`reindex_all.py`** | Rebuild vectors from SQLite. |
+| **`evaluate_rag.py`** | Retrieval / QA evaluation harness. |
 
-### 7.2 Environment & Dependencies
+### 7.2 Environment
 
-From the existing project summary:
+- **`ANTHROPIC_API_KEY`** – Shorty pipeline on Anthropic, query rewrite, answers.
+- **`OPENAI_*` / OpenAI‑compatible** – batch and local model paths in **`batch_processor.py`**.
+- **`ASK_SHORTY_BM25`**, **`ASK_SHORTY_GRAPH`**, **`ASK_SHORTY_RERANK`**, **`ASK_SHORTY_HSC`** – optional retrieval behavior.
+- **`ASK_SHORTY_DB_PATH`** / **`TranscriptRAG(..., transcript_db=...)`** – external DB layouts (e.g. dedicated **`transcripts.db`** per machine).
 
-- Python stack using Flask, SQLite, `sentence-transformers`, `chromadb`, `youtube-transcript-api`, `yt-dlp`, and Anthropic/OpenAI SDKs.
-- Data locations:
-  - SQLite: `data/transcripts.db`.
-  - Chroma: `data/transcript_chroma` (collection `transcripts`).
-- Environment variables:
-  - `ANTHROPIC_API_KEY` – required for Shorty, synthetic questions, entities on Anthropic path, and for query rewriting/answers in `ask_shorty`.
-  - `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` – for OpenAI‑compatible paths (entity extraction, batch runs).
-  - `GRABBER_PORT` – default 5000 (bookmarklet ingest service).
+## 8. Current Status and Limitations
 
-## 8. Current Status and Future Work
+**Shipped in code today:** Shorties, synthetic questions, entities, triples → **`facts`**, Chroma multi‑type index, BM25 index, optional graph and rerank and HSC hooks, queue processing with OpenAI‑compatible and Anthropic backends, evaluation scripts, operational utilities (**`check_progress`**, **`reset_stale`**).
 
-Ask Shorty is currently a working prototype with:
+**Honest limitations:**
 
-- End‑to‑end ingest → Shorty synthesis → indexing → query answering.
-- A personal YouTube history as an initial corpus and main use‑case.
-- Ongoing improvements and bug fixes in both the pipeline and UI.
+- **Shorty quality** is model‑ and prompt‑dependent; not every detail survives compression.
+- **Cross‑video** questions stress **retrieval** more than single‑video questions; **dense embeddings alone** are often insufficient for entity‑heavy or lexically crisp queries—**BM25 (when built and enabled)** is an important practical complement.
+- **Global graph** value grows with **coverage** (many videos with clean triples and aliases) and **fresh rebuilds**; it is not “free intelligence” on day one.
+- **README “vision”** describes the **full stack when layers are on and data is complete**; default installs may run a **subset** until env flags and indexes are configured.
 
-Planned and possible extensions:
+## 9. Future Work
 
-- **Standardized Shorty template** – enforce sections like CONTEXT, INCIDENTS, ATTACK FLOW, IMPACT, MICRO‑DETAILS, TIMELINE to maximize recoverability.
-- **Fact triples / knowledge graph layer** – an additional table of (subject, relation, object) facts per video for graph queries and higher‑level reasoning.
-- **Confidence signals** – expose retrieval scores and video rankings to help users understand why particular sources were selected.
-- **Public API / hosted service** – expose ingest and query endpoints so others can build on the Shorty + RAG model.
+- Tighter **Shorty schema** (fixed sections) and **regression tests** on golden videos.
+- **Default‑on hybrid** (dense + BM25) once latency budgets are acceptable.
+- Richer **graph** traversal and **agreement** scoring across **`global_facts`**.
+- **User‑visible** retrieval diagnostics (scores, layer contributions).
+- Scale‑out paths (Postgres, hosted vector DB) for very large libraries.
 
-## 9. Conclusion
+## 10. Conclusion
 
-Ask Shorty demonstrates that adding a dense, machine‑oriented compression layer on top of conventional RAG substantially improves question‑answering over long, messy transcripts. By combining:
-
-- Shorties (90–97% token reduction, ~95% information retention),
-- Entities and synthetic questions as structured side‑channels,
-- SQLite as a transparent source of truth and Chroma as a multi‑representation vector index,
-- And a query pipeline that uses metadata filtering, query rewriting, and multi‑angle retrieval,
-
-Ask Shorty moves beyond “just chunk the transcript” and toward a more robust, research‑grade approach to LLM knowledge retrieval over video and podcast content.
-
+Ask Shorty is a **retrieval‑first** system for long‑form spoken content: **compress each video into a Shorty**, **index multiple representations**, and **optionally** fuse **keyword**, **graph**, and **reranking** signals. The Shorty remains the **core design choice**; other components are **force multipliers** whose measured impact depends on **data quality**, **index freshness**, and **configuration**—best validated with **`evaluate_rag.py`** and real queries rather than assumed from architecture diagrams alone.

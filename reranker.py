@@ -40,7 +40,15 @@ logger = logging.getLogger(__name__)
 # Configurable constants
 # ---------------------------------------------------------------------------
 
-RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+def _resolve_rerank_model() -> str:
+    """Return the fine-tuned cross-encoder path if it exists, else the default HF model."""
+    from pathlib import Path
+    local = Path(__file__).parent / "data" / "shorty_crossencoder_model"
+    if local.is_dir():
+        return str(local)
+    return "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+RERANK_MODEL_NAME = _resolve_rerank_model()
 
 # Chunks whose indices differ by at most this value are put in the same group.
 CHUNK_NEIGHBORHOOD_RADIUS = 3

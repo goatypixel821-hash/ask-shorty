@@ -5,11 +5,23 @@ Rebuild Chroma using a specified SentenceTransformer embedding model.
 Creates a NEW Chroma directory (does not overwrite the default minilm store).
 Writes the model id to data/chroma_model.txt so transcript_rag_enhanced picks it up at runtime.
 
+--model can be:
+  - A HuggingFace model id:   BAAI/bge-large-en-v1.5
+  - A local path to a saved SentenceTransformer model dir:
+      data/shorty_embedding_model
+      C:/path/to/data/shorty_embedding_model
+
 Usage:
   python reindex_with_model.py \\
     --db-path "C:/path/to/transcripts.db" \\
     --model BAAI/bge-large-en-v1.5 \\
     --chroma-dir data/transcript_chroma_bge
+
+  # After fine-tuning:
+  python reindex_with_model.py \\
+    --db-path "C:/path/to/transcripts.db" \\
+    --model data/shorty_embedding_model \\
+    --chroma-dir "C:/path/to/data/transcript_chroma_finetuned"
 """
 
 from __future__ import annotations
@@ -76,6 +88,14 @@ def main() -> None:
         sys.exit(1)
 
     model_name = args.model.strip()
+
+    # Resolve local path if it looks like a directory (fine-tuned model)
+    local_candidate = Path(model_name)
+    if not local_candidate.is_absolute():
+        local_candidate = (SCRIPT_DIR / model_name).resolve()
+    if local_candidate.is_dir():
+        model_name = str(local_candidate)
+
     data_dir = SCRIPT_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     model_file = data_dir / "chroma_model.txt"

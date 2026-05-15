@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 
 try:
     import yt_dlp
@@ -8,6 +9,23 @@ except ImportError:
     print("❌ yt-dlp not installed. Video downloading and rich metadata will be disabled.")
     print("   Run: pip install yt-dlp")
     YT_DLP_AVAILABLE = False
+
+
+def canonical_youtube_watch_url(video_url: str) -> str:
+    """
+    Strip playlist / mix / start_radio query args that can make yt-dlp hang or
+    walk huge playlists. Always prefer a plain watch?v=VIDEO_ID URL.
+    """
+    if not video_url or not video_url.strip():
+        return video_url
+    m = re.search(
+        r"(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
+        video_url,
+    )
+    if m:
+        return f"https://www.youtube.com/watch?v={m.group(1)}"
+    return video_url.strip()
+
 
 class VideoDownloader:
     def __init__(self, download_dir="youtube-history-viewer/downloads"):
@@ -24,18 +42,25 @@ class VideoDownloader:
         if not YT_DLP_AVAILABLE:
             return None
 
+        clean_url = canonical_youtube_watch_url(video_url)
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'skip_download': True, # Critical: Don't download the video
+            'skip_download': True,  # Critical: Don't download the video
+            # Avoid hanging forever on slow/broken YouTube responses
+            'socket_timeout': 30,
+            'noplaylist': True,
+            'retries': 3,
+            'fragment_retries': 3,
+            'file_access_retries': 3,
         }
-        
+
         if not quiet:
-            print(f"ℹ️ Fetching metadata for {video_url}...")
+            print(f"ℹ️ Fetching metadata for {clean_url}...")
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
+                info = ydl.extract_info(clean_url, download=False)
                 return {
                     'description': info.get('description', ''),
                     'upload_date': info.get('upload_date', ''),
@@ -61,6 +86,7 @@ class VideoDownloader:
             print("❌ Cannot download: yt-dlp not installed")
             return None
 
+        clean_url = canonical_youtube_watch_url(video_url)
         # Output template: downloads/video_id.ext
         output_template = os.path.join(self.download_dir, f"{video_id}.%(ext)s")
         
@@ -70,13 +96,17 @@ class VideoDownloader:
             'quiet': True,
             'no_warnings': True,
             'merge_output_format': 'mp4', # Ensure we get mp4
+            'socket_timeout': 30,
+            'noplaylist': True,
+            'retries': 3,
+            'fragment_retries': 3,
         }
 
         print(f"⬇️ Starting download for {video_id}...")
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
+                ydl.download([clean_url])
             
             # Find the downloaded file (it might have different extensions before merge, but we asked for mp4)
             # Check specifically for the expected filename

@@ -24,8 +24,21 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def _chroma_dir_for_db(db_path: str) -> Path:
-    """Derive Chroma directory from DB path (e.g. data/transcripts.db -> data/transcript_chroma_new)."""
-    return Path(db_path).resolve().parent / "transcript_chroma_new"
+    """Derive Chroma directory from DB path.
+
+    Prefers transcript_chroma_finetuned (the fine-tuned index) if it exists,
+    otherwise falls back to transcript_chroma_new.
+    Checks both the flat path and the old scp-r nested path.
+    """
+    data_dir = Path(db_path).resolve().parent
+    # Check nested path first (scp -r creates a nested copy), then flat
+    for candidate in (
+        data_dir / "transcript_chroma_finetuned" / "transcript_chroma_finetuned",
+        data_dir / "transcript_chroma_finetuned",
+    ):
+        if candidate.exists() and (candidate / "chroma.sqlite3").exists():
+            return candidate
+    return data_dir / "transcript_chroma_new"
 
 
 def _videos_to_index(db_path: str, all_transcripts: bool = False):
@@ -96,10 +109,10 @@ def _index_one_video_shared(db, rag, db_path: str, video_id: str) -> None:
 def _index_one_video(db_path: str, chroma_dir: Path, video_id: str) -> None:
     """Load RAG and DB, then index this one video (used for single-video mode only)."""
     from transcript_database import TranscriptDatabase
-    from transcript_rag import TranscriptRAG
+    from transcript_rag_enhanced import EnhancedTranscriptRAG
 
     db = TranscriptDatabase(db_path)
-    rag = TranscriptRAG(transcript_db=str(db_path), chroma_dir=str(chroma_dir))
+    rag = EnhancedTranscriptRAG(transcript_db=str(db_path), chroma_dir=str(chroma_dir))
     _index_one_video_shared(db, rag, db_path, video_id)
 
 
@@ -143,11 +156,11 @@ def main() -> None:
 
     # Full run — create shared DB + RAG once, reuse across all videos
     from transcript_database import TranscriptDatabase
-    from transcript_rag import TranscriptRAG
+    from transcript_rag_enhanced import EnhancedTranscriptRAG
 
     print("Loading embedding model and Chroma (one-time)...")
     db = TranscriptDatabase(db_path)
-    rag = TranscriptRAG(transcript_db=str(db_path), chroma_dir=str(chroma_dir))
+    rag = EnhancedTranscriptRAG(transcript_db=str(db_path), chroma_dir=str(chroma_dir))
     print("Ready.\n")
 
     videos = list(_videos_to_index(db_path, all_transcripts=args.all_transcripts))

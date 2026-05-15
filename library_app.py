@@ -24,6 +24,7 @@ from flask import (
 from shorty_generator import generate_shorty
 from shorty_generator import generate_synthetic_questions
 from entity_extractor import extract_entities, store_entities
+from transcript_database import TranscriptDatabase
 
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "transcripts.db")
@@ -535,7 +536,7 @@ def regenerate_entities(video_id: str):
     # Extract and store new entities
     entities = extract_entities(transcript_text, title=title)
     if entities:
-        store_entities(video_id, entities)
+        store_entities(video_id, entities, db=TranscriptDatabase(DB_PATH))
         flash(f"Regenerated {len(entities)} entities.", "success")
     else:
         flash("No entities extracted from transcript.", "warning")

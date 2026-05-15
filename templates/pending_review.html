@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pending Review</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 18px; color: #111; }
+    h1 { margin: 0 0 12px; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    input[type="text"] { padding: 8px; min-width: 320px; }
+    button { padding: 8px 10px; cursor: pointer; }
+    .count { font-weight: bold; margin-left: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f6f6f6; position: sticky; top: 0; }
+    tr.hidden { display: none; }
+    .muted { color: #666; font-size: 12px; }
+    a { color: #0a58ca; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Pending Shorty Review</h1>
+  <div class="controls">
+    <input id="search" type="text" placeholder="Search by title or channel">
+    <button id="flagAdsBtn" type="button">Flag Ads</button>
+    <button id="skipSelectedBtn" type="button">Skip Selected</button>
+    <button id="processSelectedBtn" type="button">Process Selected</button>
+    <span class="count" id="selectionCount">0 of 0 selected</span>
+  </div>
+
+  <div class="muted" style="margin-bottom:10px;">
+    Rows: <span id="rowCount">0</span> |
+    Visible: <span id="visibleCount">0</span>
+  </div>
+
+  <table id="pendingTable">
+    <thead>
+      <tr>
+        <th><input id="selectAllVisible" type="checkbox"></th>
+        <th>Channel</th>
+        <th>Title</th>
+        <th>video_id</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in videos %}
+      <tr
+        data-video-id="{{ v.video_id }}"
+        data-channel="{{ v.channel|lower }}"
+        data-title="{{ v.title|lower }}"
+        data-ad-flag="{{ '1' if v.ad_flag else '0' }}"
+      >
+        <td><input class="rowCheck" type="checkbox"></td>
+        <td>{{ v.channel }}</td>
+        <td>{{ v.title }}</td>
+        <td><a href="/review/{{ v.video_id }}" target="_blank" rel="noopener">{{ v.video_id }}</a></td>
+        <td><button class="skipOneBtn" type="button">Skip</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    const table = document.getElementById("pendingTable");
+    const tbody = table.querySelector("tbody");
+    const searchInput = document.getElementById("search");
+    const selectAllVisible = document.getElementById("selectAllVisible");
+    const flagAdsBtn = document.getElementById("flagAdsBtn");
+    const skipSelectedBtn = document.getElementById("skipSelectedBtn");
+    const processSelectedBtn = document.getElementById("processSelectedBtn");
+    const selectionCount = document.getElementById("selectionCount");
+    const rowCount = document.getElementById("rowCount");
+    const visibleCount = document.getElementById("visibleCount");
+
+    function allRows() {
+      return Array.from(tbody.querySelectorAll("tr"));
+    }
+
+    function visibleRows() {
+      return allRows().filter(r => !r.classList.contains("hidden"));
+    }
+
+    function selectedRows() {
+      return allRows().filter(r => r.querySelector(".rowCheck").checked);
+    }
+
+    function updateCounts() {
+      const total = allRows().length;
+      const visible = visibleRows().length;
+      const selected = selectedRows().length;
+      rowCount.textContent = String(total);
+      visibleCount.textContent = String(visible);
+      selectionCount.textContent = `${selected} of ${total} selected`;
+    }
+
+    function applySearchFilter() {
+      const q = searchInput.value.trim().toLowerCase();
+      allRows().forEach(row => {
+        const channel = row.dataset.channel || "";
+        const title = row.dataset.title || "";
+        const match = !q || channel.includes(q) || title.includes(q);
+        row.classList.toggle("hidden", !match);
+      });
+      updateCounts();
+    }
+
+    async function skipVideoIds(videoIds) {
+      if (!videoIds.length) return { success: true, updated_rows: 0 };
+      const resp = await fetch("/api/pending-review/skip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ video_ids: videoIds })
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || "Skip request failed");
+      }
+      return data;
+    }
+
+    function removeRowsByVideoIds(videoIds) {
+      const set = new Set(videoIds);
+      allRows().forEach(row => {
+        if (set.has(row.dataset.videoId)) row.remove();
+      });
+      updateCounts();
+    }
+
+    searchInput.addEventListener("input", applySearchFilter);
+
+    selectAllVisible.addEventListener("change", () => {
+      visibleRows().forEach(row => {
+        row.querySelector(".rowCheck").checked = selectAllVisible.checked;
+      });
+      updateCounts();
+    });
+
+    tbody.addEventListener("change", (e) => {
+      if (e.target && e.target.classList.contains("rowCheck")) {
+        updateCounts();
+      }
+    });
+
+    flagAdsBtn.addEventListener("click", () => {
+      allRows().forEach(row => {
+        if (row.dataset.adFlag === "1") {
+          row.querySelector(".rowCheck").checked = true;
+        }
+      });
+      updateCounts();
+    });
+
+    skipSelectedBtn.addEventListener("click", async () => {
+      const vids = selectedRows().map(r => r.dataset.videoId);
+      if (!vids.length) return;
+      if (!confirm(`Skip ${vids.length} selected videos?`)) return;
+      try {
+        await skipVideoIds(vids);
+        removeRowsByVideoIds(vids);
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+
+    processSelectedBtn.addEventListener("click", async () => {
+      const selected = new Set(selectedRows().map(r => r.dataset.videoId));
+      if (!selected.size) return;
+      const toSkip = allRows()
+        .map(r => r.dataset.videoId)
+        .filter(id => !selected.has(id));
+      if (!toSkip.length) return;
+      if (!confirm(`Keep ${selected.size} selected and skip ${toSkip.length} others?`)) return;
+      try {
+        await skipVideoIds(toSkip);
+        removeRowsByVideoIds(toSkip);
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+
+    tbody.addEventListener("click", async (e) => {
+      const btn = e.target;
+      if (!(btn instanceof HTMLElement) || !btn.classList.contains("skipOneBtn")) return;
+      const row = btn.closest("tr");
+      if (!row) return;
+      const videoId = row.dataset.videoId;
+      if (!videoId) return;
+      if (!confirm(`Skip video ${videoId}?`)) return;
+      try {
+        await skipVideoIds([videoId]);
+        row.remove();
+        updateCounts();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+
+    applySearchFilter();
+    updateCounts();
+  </script>
+</body>
+</html>

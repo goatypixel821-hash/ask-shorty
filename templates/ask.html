@@ -33,9 +33,20 @@
       letter-spacing: 0.03em;
     }
     .tagline {
-      margin: 0 0 20px;
+      margin: 0 0 8px;
       color: #9ca3af;
       font-size: 14px;
+    }
+    .nav-row {
+      margin: 0 0 18px;
+      font-size: 13px;
+    }
+    .nav-row a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    .nav-row a:hover {
+      text-decoration: underline;
     }
     label {
       font-size: 13px;
@@ -121,6 +132,11 @@
       line-height: 1.5;
       white-space: pre-wrap;
     }
+    .ref-id-line {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #64748b;
+    }
     .meta {
       margin-top: 6px;
       font-size: 11px;
@@ -203,6 +219,7 @@
     <div class="card">
       <h1>Ask Shorty</h1>
       <p class="tagline">Ask anything from your indexed videos &amp; podcasts. Answers come from transcripts, Shorties, and synthetic questions.</p>
+      <p class="nav-row"><a href="/pending-review">Pending review</a> — manage videos waiting for Shorty processing</p>
 
       <label for="question">Question</label>
       <textarea id="question" placeholder="e.g. What did I watch about DCS-3000 and Red Hook?"></textarea>
@@ -223,6 +240,7 @@
       <div class="answer-card" id="answer-card" style="display:none;">
         <div class="answer-title">Answer</div>
         <div class="answer-box" id="answer-box"></div>
+        <div class="ref-id-line" id="ref-id-line" style="display:none;"></div>
         <div class="meta" id="meta-box"></div>
         <ul class="sources-list" id="sources-list" style="display:none;"></ul>
       </div>
@@ -245,6 +263,7 @@
     const errEl         = document.getElementById("error");
     const answerCard    = document.getElementById("answer-card");
     const answerBox     = document.getElementById("answer-box");
+    const refIdLine     = document.getElementById("ref-id-line");
     const metaBox       = document.getElementById("meta-box");
     const sourcesList   = document.getElementById("sources-list");
     const statusLine    = document.getElementById("status-line");
@@ -457,6 +476,10 @@
       errEl.textContent = "";
       answerCard.style.display = "none";
       answerBox.textContent = "";
+      if (refIdLine) {
+        refIdLine.textContent = "";
+        refIdLine.style.display = "none";
+      }
       metaBox.textContent = "";
       sourcesList.innerHTML = "";
       sourcesList.style.display = "none";
@@ -555,6 +578,15 @@
             // status === completed and success === true
             statusLine.textContent = "Answer ready.";
             answerBox.textContent = body.answer || "(No answer returned.)";
+            if (refIdLine) {
+              if (body.ref_id) {
+                refIdLine.textContent = "Saved as " + body.ref_id;
+                refIdLine.style.display = "block";
+              } else {
+                refIdLine.textContent = "";
+                refIdLine.style.display = "none";
+              }
+            }
             const ctx = body.used_context || [];
             metaBox.textContent = ctx.length
               ? `Used ${ctx.length} context passages across transcript chunks, Shorties, and synthetic questions.`

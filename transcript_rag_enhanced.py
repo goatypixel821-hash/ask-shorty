@@ -9,6 +9,7 @@ Enhanced RAG System for YouTube Transcripts
 
 import sqlite3
 import chromadb
+from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 import json
@@ -17,6 +18,20 @@ import sys
 import threading
 from typing import List, Dict, Tuple, Optional
 
+
+def _load_shorty_dotenv() -> None:
+    """Load ``shorty/.env`` so ASK_SHORTY_* vars apply (optional: pip install python-dotenv)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=True)
+
+
+_load_shorty_dotenv()
+
 # Global shared model instance to prevent multiple simultaneous initializations
 _shared_model = None
 _model_lock = threading.Lock()
@@ -24,6 +39,8 @@ _model_lock = threading.Lock()
 # Safe print function for Windows console encoding
 def safe_print(*args, **kwargs):
     """Print that handles emoji encoding errors on Windows"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    args = (f"[{ts}]",) + tuple(args)
     try:
         text = ' '.join(str(arg) for arg in args)
         if 'end' not in kwargs:
@@ -68,12 +85,12 @@ class EnhancedTranscriptRAG:
             chroma_dir = _os.environ.get("ASK_SHORTY_CHROMA_PATH") or None
 
         if transcript_db is None:
-            self.transcript_db = base_dir / 'data' / 'transcripts.db'
+            self.transcript_db = Path(r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db")
         else:
             self.transcript_db = Path(transcript_db)
             
         if chroma_dir is None:
-            self.chroma_dir = base_dir / 'data' / 'transcript_chroma_new'
+            self.chroma_dir = base_dir / 'data' / 'transcript_chroma_finetuned'
         else:
             self.chroma_dir = Path(chroma_dir)
 

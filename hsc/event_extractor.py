@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
+HSCChatFn = Callable[[str, str, int, float], str]
 
 from anthropic_client import get_client
 
@@ -83,13 +85,23 @@ def parse_events_json(raw: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _anthropic_response_text(resp: Any) -> str:
+    raw = ""
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            raw += block.text
+        elif isinstance(block, dict) and block.get("type") == "text":
+            raw += block.get("text", "")
+    return raw.strip()
+
+
 def extract_events(
     transcript_text: str,
     title: str = "",
     shorty_text: str = "",
+    chat_fn: Optional[HSCChatFn] = None,
 ) -> List[Dict[str, Any]]:
     """LLM extraction; returns rows ready for DB (includes raw_json)."""
-    client = get_client()
     tr = (transcript_text or "")[:100000]
     sh = (shorty_text or "")[:80000]
     user = EVENT_USER_TEMPLATE.format(
@@ -97,19 +109,18 @@ def extract_events(
         transcript=tr,
         shorty=sh or "(none)",
     )
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        temperature=0.15,
-        system=EVENT_SYSTEM,
-        messages=[{"role": "user", "content": user}],
-    )
-    raw = ""
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            raw += block.text
-        elif isinstance(block, dict) and block.get("type") == "text":
-            raw += block.get("text", "")
+    if chat_fn is not None:
+        raw = chat_fn(EVENT_SYSTEM, user, 4096, 0.15)
+    else:
+        client = get_client()
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            temperature=0.15,
+            system=EVENT_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        raw = _anthropic_response_text(resp)
     events = parse_events_json(raw)
     for ev in events:
         if "raw_json" not in ev:

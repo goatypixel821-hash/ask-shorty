@@ -36,6 +36,20 @@
             border-radius: 4px;
             cursor: pointer;
         }
+        .review-btn {
+            background: #1565c0;
+        }
+        .review-btn:hover {
+            background: #0d47a1;
+        }
+        .success-actions {
+            margin-top: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+        }
     </style>
 </head>
 <body>
@@ -49,7 +63,10 @@
         <div class="status-icon success">✅</div>
         <h2 id="success-title">Success!</h2>
         <p id="success-msg">Transcript saved to database.</p>
-        <button class="close-btn" onclick="window.close()">Close Window</button>
+        <div class="success-actions">
+            <button type="button" class="close-btn review-btn" id="view-review-btn" style="display: none;">View Review</button>
+            <button class="close-btn" onclick="window.close()">Close Window</button>
+        </div>
     </div>
 
     <div id="error" style="display: none;">
@@ -73,10 +90,23 @@
     </div>
 
     <script>
+        const REVIEW_BASE = 'http://localhost:5001/review/';
         const urlParams = new URLSearchParams(window.location.search);
         const videoUrl = urlParams.get('url');
         const videoTitle = urlParams.get('title');
         const videoChannel = urlParams.get('channel');
+        let reviewOpenTimer = null;
+
+        function extractVideoIdFromUrl(u) {
+            if (!u) return null;
+            const m = u.match(/[?&]v=([a-zA-Z0-9_-]{11})/) || u.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/) || u.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
+            return m ? m[1] : null;
+        }
+
+        function openReviewInNewTab(videoId) {
+            if (!videoId) return;
+            window.open(REVIEW_BASE + encodeURIComponent(videoId), '_blank', 'noopener,noreferrer');
+        }
 
         if (!videoUrl) {
             showError('No URL provided');
@@ -96,11 +126,14 @@
                     if (data.paste_required) {
                         showPasteForm(data);
                     } else if (data.message === 'Transcript already exists') {
-                        showSuccess('Already Got It!', 'You already have the transcript for this video.');
+                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
+                        showSuccess('Already Got It!', 'You already have the transcript for this video.', vid);
                     } else if (data.warning) {
-                        showSuccess('Video Saved!', data.message || 'Video saved (no transcript available).');
+                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
+                        showSuccess('Video Saved!', data.message || 'Video saved (no transcript available).', vid);
                     } else {
-                        showSuccess('Saved!', data.message || 'Video and transcript saved to database.');
+                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
+                        showSuccess('Saved!', data.message || 'Video and transcript saved to database.', vid);
                     }
                 } else {
                     showError(data.error || 'Unknown error');
@@ -139,7 +172,8 @@
                 .then(r => r.json())
                 .then(d => {
                     if (d.success) {
-                        showSuccess('Saved!', 'Transcript saved and vectorizing in background.');
+                        const vid = d.video_id || data.video_id || extractVideoIdFromUrl(videoUrl);
+                        showSuccess('Saved!', 'Transcript saved and vectorizing in background.', vid);
                     } else {
                         showError(d.error || 'Save failed');
                     }
@@ -150,13 +184,34 @@
             };
         }
 
-        function showSuccess(title, msg) {
+        function showSuccess(title, msg, videoId) {
+            if (reviewOpenTimer) {
+                clearTimeout(reviewOpenTimer);
+                reviewOpenTimer = null;
+            }
             document.getElementById('loading').style.display = 'none';
             document.getElementById('success').style.display = 'block';
             document.getElementById('paste').style.display = 'none';
             if (title) document.getElementById('success-title').textContent = title;
             if (msg) document.getElementById('success-msg').textContent = msg;
-            setTimeout(() => window.close(), 2000);
+            const reviewBtn = document.getElementById('view-review-btn');
+            const vid = videoId || extractVideoIdFromUrl(videoUrl);
+            if (vid) {
+                reviewBtn.style.display = 'inline-block';
+                reviewBtn.onclick = function () {
+                    openReviewInNewTab(vid);
+                };
+                reviewOpenTimer = setTimeout(function () {
+                    openReviewInNewTab(vid);
+                    reviewOpenTimer = null;
+                }, 3500);
+            } else {
+                reviewBtn.style.display = 'none';
+                reviewBtn.onclick = null;
+                setTimeout(function () {
+                    window.close();
+                }, 2500);
+            }
         }
 
         function showError(msg) {

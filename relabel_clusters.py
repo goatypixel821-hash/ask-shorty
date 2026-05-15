@@ -1,85 +1,39 @@
-#!/usr/bin/env python3
-"""
-Relabel existing clusters.json using the working Sonnet model.
-Much faster than rebuild — skips embedding, UMAP, HDBSCAN entirely.
-
-    python relabel_clusters.py
-"""
-
-import json
-import sqlite3
+﻿import json, os, time
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path('.') / '.env', override=False)
+from openai import OpenAI
 
-CLUSTERS_PATH = Path("data/clusters.json")
-FULL_DB       = "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
-LABEL_MODEL   = "claude-sonnet-4-20250514"   # same model as Ask Shorty
+client = OpenAI(api_key=os.environ['OPENROUTER_API_KEY'], base_url='https://openrouter.ai/api/v1')
 
+def get_label(titles, model):
+    prompt = "These YouTube videos are grouped together. Give a short 3-5 word topic label.\n\nVideos:\n" + "\n".join(f"- {t}" for t in titles) + "\n\nRespond with only the label, nothing else."
+    for attempt in range(3):
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=20,
+            temperature=0.3,
+            messages=[{'role':'user','content':prompt}]
+        )
+        label = (resp.choices[0].message.content or '').strip()
+        if label:
+            return label
+        time.sleep(1)
+    return 'Unlabeled'
 
-def get_shorty(video_id: str, conn) -> str:
-    c = conn.cursor()
-    c.execute("SELECT shorty FROM transcripts WHERE video_id=? AND shorty IS NOT NULL LIMIT 1", (video_id,))
-    row = c.fetchone()
-    return row[0] if row else ""
+with open(r'data\clusters.json', encoding='utf-8') as f:
+    data = json.load(f)
 
+unlabeled = [c for c in data['clusters'] if c['label'] in ('Unlabeled', '', None)]
+print(f'Relabeling {len(unlabeled)} unlabeled clusters with deepseek/deepseek-chat...')
 
-def label_cluster(videos, conn):
-    from anthropic_client import get_client
-    client = get_client()
+for c in unlabeled:
+    titles = [v['title'] for v in c['videos'][:15]]
+    label = get_label(titles, 'deepseek/deepseek-chat')
+    c['label'] = label
+    print(f"  Cluster {c['id']} ({c['count']} videos): {label}")
+    time.sleep(0.3)
 
-    snippets = []
-    for v in videos[:5]:
-        shorty = get_shorty(v["video_id"], conn)
-        if shorty:
-            snippets.append(f"Title: {v['title']}\nChannel: {v['channel']}\n{shorty[:400]}")
-
-    if not snippets:
-        # Fall back to just titles
-        snippets = [f"Title: {v['title']}\nChannel: {v['channel']}" for v in videos[:5]]
-
-    prompt = (
-        "Below are summaries of videos that cluster together by topic.\n"
-        "Give this cluster a short label (3-6 words) capturing the main theme.\n"
-        "Output ONLY the label, no explanation.\n\n"
-        + "\n\n---\n\n".join(snippets)
-    )
-
-    resp = client.messages.create(
-        model=LABEL_MODEL,
-        max_tokens=32,
-        temperature=0,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return resp.content[0].text.strip().strip('"').strip("'")
-
-
-def main():
-    if not CLUSTERS_PATH.exists():
-        print("data/clusters.json not found. Run build_clusters.py first.")
-        return
-
-    data = json.loads(CLUSTERS_PATH.read_text(encoding="utf-8"))
-    clusters = data.get("clusters", [])
-    print(f"Relabeling {len(clusters)} clusters using {LABEL_MODEL}...\n")
-
-    conn = sqlite3.connect(FULL_DB)
-
-    for i, cluster in enumerate(clusters):
-        old_label = cluster.get("label", f"Cluster {cluster['id']}")
-        print(f"  [{i+1}/{len(clusters)}] {len(cluster['videos'])} videos — labeling...", end=" ", flush=True)
-        try:
-            label = label_cluster(cluster["videos"], conn)
-            cluster["label"] = label
-            print(label)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            cluster["label"] = old_label
-
-    conn.close()
-
-    CLUSTERS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"\nSaved updated labels to {CLUSTERS_PATH}")
-    print("Restart the Flask app and visit /knowledge")
-
-
-if __name__ == "__main__":
-    main()
+with open(r'data\clusters.json', 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False)
+print('Done - restart Flask app to see labels')
