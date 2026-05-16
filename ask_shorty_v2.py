@@ -657,6 +657,10 @@ class AskShortyV2:
         route_res = self.router.classify(q)
         route = route_res.route_type
         timing["classify_ms"] = _ms_since(t_cl)
+        print(
+            f"[ask_shorty_v2] V2 route={route!r} reason={route_res.reason!r}",
+            flush=True,
+        )
 
         t_exp = time.perf_counter()
         try:
