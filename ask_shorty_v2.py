@@ -29,6 +29,8 @@ VIDEO_BM25_TOP_K = 100
 VIDEO_CAND_MERGED_CAP = 100
 # Global segment BM25: top-N distinct videos to merge into the pool after video-level BM25.
 SEGMENT_RESCUE_VIDEO_TOP = 20
+# When the merge pool is already at cap, swap out this many lowest video-BM25 slots for rescue hits.
+SEGMENT_RESCUE_REPLACE_COUNT = 10
 # How many segment hits to scan per query string before collapsing to videos (need enough diversity).
 SEGMENT_RESCUE_SEGMENT_PER_QUERY = 300
 # Max segment (doc, score) pairs from segment BM25 before pool / rerank (limits downstream work).
@@ -712,12 +714,30 @@ class AskShortyV2:
             n_videos=SEGMENT_RESCUE_VIDEO_TOP,
             segments_per_query=SEGMENT_RESCUE_SEGMENT_PER_QUERY,
         )
+        video_bm25_by_pool = {v: float(s) for v, s in vid_ranked}
+        rescue_incoming: List[str] = []
         for vid in rescue_vids:
-            if len(ordered) >= VIDEO_CAND_MERGED_CAP:
-                break
             if restrict and vid not in restrict:
                 continue
             if vid not in seen:
+                rescue_incoming.append(vid)
+
+        if len(ordered) >= VIDEO_CAND_MERGED_CAP and rescue_incoming:
+            n_replace = min(SEGMENT_RESCUE_REPLACE_COUNT, len(rescue_incoming))
+            victims = sorted(
+                ordered, key=lambda v: video_bm25_by_pool.get(v, 0.0)
+            )[:n_replace]
+            victim_set = set(victims)
+            ordered = [v for v in ordered if v not in victim_set]
+            for v in victims:
+                seen.discard(v)
+            for vid in rescue_incoming[:n_replace]:
+                seen.add(vid)
+                ordered.append(vid)
+        else:
+            for vid in rescue_incoming:
+                if len(ordered) >= VIDEO_CAND_MERGED_CAP:
+                    break
                 seen.add(vid)
                 ordered.append(vid)
         timing["segment_rescue_ms"] = _ms_since(t_rescue)
@@ -806,14 +826,11 @@ class AskShortyV2:
             route == "topic_lookup"
             and route_res.topic_watch_sort in ("oldest_first", "recent_first")
         )
-        skip_general = route == "general"
-        skip_ce_fast_path = skip_watch or skip_general or bm25_skip
+        skip_ce_fast_path = skip_watch or bm25_skip
 
         skip_bits: List[str] = []
         if skip_watch:
             skip_bits.append("watch_date_topic_lookup")
-        if skip_general:
-            skip_bits.append("general_route")
         if bm25_skip:
             skip_bits.append("bm25_confidence:" + bm25_detail)
 
@@ -840,7 +857,11 @@ class AskShortyV2:
                 key=lambda v: (-_max_seg_score(v), merge_pos[v]),
             )
         else:
-            ce_slice = ordered[: min(CROSS_ENCODER_MAX_CANDIDATES, len(ordered))]
+            ce_cap = min(CROSS_ENCODER_MAX_CANDIDATES, len(ordered))
+            if route == "general":
+                ce_slice = sorted(ordered, key=lambda v: -_max_seg_score(v))[:ce_cap]
+            else:
+                ce_slice = ordered[:ce_cap]
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()

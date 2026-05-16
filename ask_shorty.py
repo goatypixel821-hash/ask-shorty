@@ -156,6 +156,10 @@ today on the machine running the app.
 Never answer date, history, or channel questions from memory. Always call
 the appropriate tool to retrieve fresh data from the database.
 
+Video metadata in the database may include DESCRIPTION, TAGS, and CHAPTERS
+(from YouTube json_metadata) when available; these are folded into V2 routing
+text and Shorties for newly processed videos.
+
 Citation requirements for the final answer:
 - Cite sources using video title and channel.
 - Include watch date as (watched: YYYY-MM-DD) when available.
@@ -163,7 +167,9 @@ Citation requirements for the final answer:
 
 You may use tools:
 - search_vectors(query, type) where type is chunk|shorty|synthetic_question
-- search_bm25(query)
+- search_bm25(query) — hierarchical V2 retrieval (video + segment BM25, query
+  expansion, segment rescue, cross-encoder rerank on general queries); prefer
+  this for broad factual search across the library
 - get_shorty(video_id)
 - search_entities(name)
 - get_transcript_chunk(video_id, timestamp_hint)
@@ -176,6 +182,7 @@ You may use tools:
 - get_videos_by_channel_with_shorties(channel_name, limit=10)
 - get_videos_by_date(start_date, end_date, limit=20, channel_name optional)
 - get_recent_videos(days=30, limit=20, channel_name optional)
+- get_earliest_video(topic_query) — oldest watch_date video matching a topic (requires Shorty)
 """
 
 
@@ -880,29 +887,52 @@ Given a natural language question, extract:
         return {"hits": payload, "context_blocks": context_blocks}
 
     def _agent_search_bm25(self, query: str) -> Dict[str, Any]:
-        bm25 = self._get_bm25()
-        hits = bm25.search(query, top_k=8)
+        from ask_shorty_v2 import _shared_ask_shorty_v2_engine
+
+        q = (query or "").strip()
+        if not q:
+            return {"hits": [], "context_blocks": []}
+
+        eng = _shared_ask_shorty_v2_engine(str(self.db.db_path))  # type: ignore[attr-defined]
+        vids, dbg = eng.retrieve_videos(q)
+        scores_by_vid: Dict[str, float] = dict(dbg.get("rank_scores") or {})
         video_meta = self._load_video_meta_map()
         payload: List[Dict[str, Any]] = []
         context_blocks: List[str] = []
-        for i, h in enumerate(hits):
-            vid = h.get("video_id", "")
+        for i, vid in enumerate(vids[:8]):
             vm = video_meta.get(vid, {})
-            header = f"[chunk] video_id={vid}"
+            preview = ""
+            if eng._maps:
+                preview = (eng._maps.video_routing_text.get(vid) or "").strip()
+            if not preview:
+                conn = sqlite3.connect(self.db.db_path)  # type: ignore[attr-defined]
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT shorty FROM transcripts
+                    WHERE video_id = ? AND shorty IS NOT NULL AND trim(shorty) != ''
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (vid,),
+                )
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0]:
+                    preview = (row[0] or "").strip()
+            header = f"[v2_retrieval] video_id={vid}"
             if vm.get("channel"):
                 header += f" CHANNEL={vm['channel']}"
             if vm.get("watch_date"):
                 header += f" WATCHED={vm['watch_date']}"
-            header += f" bm25_rank={i+1}"
-            preview = (h.get("text_preview") or "").strip()
-            context_blocks.append(f"{header}\n{preview}\n")
+            header += f" rank={i + 1}"
+            context_blocks.append(f"{header}\n{preview[:260]}\n")
             payload.append(
                 {
                     "video_id": vid,
                     "title": vm.get("title", vid),
                     "channel": vm.get("channel", ""),
                     "watch_date": vm.get("watch_date", ""),
-                    "score": round(float(h.get("score") or 0.0), 4),
+                    "score": round(float(scores_by_vid.get(vid, 0.0)), 4),
                     "text_preview": preview[:260],
                 }
             )

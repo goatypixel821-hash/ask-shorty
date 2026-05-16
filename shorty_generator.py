@@ -36,26 +36,20 @@ DATE: <YYYY-MM-DD>
 CONTEXT (2–3 sentences)
 What this covers, why it matters.
 
-INCIDENTS/TOPICS (1–3 blocks)
-INCIDENT 1 – <specific name>
-- Actors: <names/groups with aliases>
-- Target: <system/org with versions>
-- Method: <technique with tool names>
-- Result: <outcome with numbers>
-- Impact: <scope with metrics>
+If DESCRIPTION, TAGS, or CHAPTERS appear at the top of the transcript input, those
+lines are video metadata (not spoken transcript). Use them to improve entity
+extraction and topic labeling; do not copy them verbatim into the Shorty.
 
-(If there are additional major incidents or topics, add INCIDENT 2, INCIDENT 3 with the same bullet pattern.)
+TOPICS (1–3 blocks; use as many as the video needs — DIY, science, news, finance,
+commentary, tutorial, or any other format)
+TOPIC 1 – <specific name or theme>
+- What it is: <subject, claim, project, or storyline>
+- Who/what is involved: <people, tools, orgs, products, places, systems>
+- Key details: <numbers, steps, mechanisms, claims, comparisons, specs>
+- Outcome or conclusion: <result, takeaway, verdict, recommendation, or open question>
 
-EVENT FLOW (numbered, causal)
-1. Initial condition
-2. Action → consequence
-3. Escalation → next step
-(Continue numbering if needed.)
-
-IMPACT/RISKS
-- Direct consequences
-- Broader implications
-- Lessons learned
+(If the video covers additional distinct subjects, add TOPIC 2, TOPIC 3 with the
+same bullet pattern.)
 
 MICRO-DETAILS (critical for retrieval)
 Dates: All dates in YYYY-MM-DD format
