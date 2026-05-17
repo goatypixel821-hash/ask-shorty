@@ -212,6 +212,43 @@
       color: #fecaca;
       font-size: 13px;
     }
+    button.btn-secondary {
+      background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+      color: #0c4a6e;
+      box-shadow: 0 10px 25px rgba(14, 165, 233, 0.35);
+    }
+    .mode-hint {
+      font-size: 12px;
+      color: #94a3b8;
+      margin: 0 0 10px;
+      line-height: 1.45;
+    }
+    .search-results-card {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(148, 163, 184, 0.35);
+    }
+    .search-hit {
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+    .search-hit-title { font-weight: 600; color: #f1f5f9; }
+    .search-hit-meta { font-size: 11px; color: #94a3b8; margin: 4px 0; }
+    .search-hit-snippet {
+      font-size: 12px;
+      color: #cbd5e1;
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+    .search-hit-reasons {
+      font-size: 10px;
+      color: #64748b;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -231,15 +268,27 @@
           <input id="video-filter" type="text" placeholder="e.g. dQw4w9WgXcQ, abc123xyz89" />
         </div>
         <div style="flex:1;"></div>
-        <button id="ask-btn">
-          <span>Ask Shorty</span>
+        <button id="search-btn" type="button">
+          <span>Fast Search</span>
+        </button>
+        <button id="deep-btn" type="button" class="btn-secondary">
+          <span>Deep Answer</span>
         </button>
       </div>
 
+      <p class="mode-hint" style="margin-top:8px;">
+        Fast Search is the default. Use Deep Answer to synthesize an answer from the same question.
+      </p>
+
       <div id="error" class="error" style="display:none;"></div>
 
+      <div class="search-results-card" id="search-results-card" style="display:none;">
+        <div class="answer-title">Search results</div>
+        <div id="search-results-list"></div>
+      </div>
+
       <div class="answer-card" id="answer-card" style="display:none;">
-        <div class="answer-title">Answer</div>
+        <div class="answer-title">Deep answer</div>
         <div class="answer-box" id="answer-box"></div>
         <div class="ref-id-line" id="ref-id-line" style="display:none;"></div>
         <div class="meta" id="meta-box"></div>
@@ -258,10 +307,13 @@
   </div>
 
   <script>
-    const askBtn        = document.getElementById("ask-btn");
+    const searchBtn     = document.getElementById("search-btn");
+    const deepBtn       = document.getElementById("deep-btn");
     const qEl           = document.getElementById("question");
     const vidEl         = document.getElementById("video-filter");
     const errEl         = document.getElementById("error");
+    const searchResultsCard = document.getElementById("search-results-card");
+    const searchResultsList = document.getElementById("search-results-list");
     const answerCard    = document.getElementById("answer-card");
     const answerBox     = document.getElementById("answer-box");
     const refIdLine     = document.getElementById("ref-id-line");
@@ -494,12 +546,17 @@
       };
     }
 
-    async function doAsk() {
-      const q = qEl.value.trim();
-      const rawVideos = vidEl.value.trim();
+    function parseVideoIds(rawVideos) {
+      if (!rawVideos) return null;
+      return rawVideos.split(",").map(v => v.trim()).filter(Boolean);
+    }
+
+    function resetUiForQuery() {
       errEl.style.display = "none";
       errEl.textContent = "";
       answerCard.style.display = "none";
+      searchResultsCard.style.display = "none";
+      searchResultsList.innerHTML = "";
       answerBox.textContent = "";
       if (refIdLine) {
         refIdLine.textContent = "";
@@ -513,6 +570,13 @@
       if (_es) { _es.close(); _es = null; }
       debugWrap.style.display = "none";
       debugLog.innerHTML = "";
+    }
+
+    async function doFastSearch() {
+      const q = qEl.value.trim();
+      const rawVideos = vidEl.value.trim();
+      resetUiForQuery();
+      statusLine.textContent = "";
 
       if (!q) {
         errEl.textContent = "Please enter a question.";
@@ -520,13 +584,73 @@
         return;
       }
 
-      askBtn.disabled = true;
-      askBtn.textContent = "Thinking...";
+      searchBtn.disabled = true;
+      deepBtn.disabled = true;
+      searchBtn.textContent = "Searching...";
       try {
-        let video_ids = null;
-        if (rawVideos) {
-          video_ids = rawVideos.split(",").map(v => v.trim()).filter(Boolean);
+        const video_ids = parseVideoIds(rawVideos);
+        const resp = await fetch("/api/search_fast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q, video_ids })
+        });
+        const data = await readJsonOrThrow(resp, "/api/search_fast");
+        if (!resp.ok || !data.success) {
+          throw new Error(data.error || "Fast search failed.");
         }
+
+        const hits = data.results || [];
+        const ms = data.elapsed_ms != null ? data.elapsed_ms : "";
+        statusLine.textContent = hits.length
+          ? `Found ${hits.length} result(s) in ${ms}ms (route: ${data.route_type || "?"}).`
+          : `No matches (${ms}ms).`;
+
+        searchResultsList.innerHTML = "";
+        hits.forEach((hit, i) => {
+          const div = document.createElement("div");
+          div.className = "search-hit";
+          const meta = [
+            hit.channel ? "@" + hit.channel : "",
+            hit.watch_date ? "watched " + hit.watch_date : "",
+            hit.timestamp_range ? hit.timestamp_range : "",
+            hit.score != null ? "score " + hit.score : "",
+            hit.score_source ? "[" + hit.score_source + "]" : ""
+          ].filter(Boolean).join(" · ");
+          const reasons = (hit.match_reasons || []).join(", ");
+          div.innerHTML =
+            `<div class="search-hit-title">${i + 1}. ${esc(hit.title || hit.video_id)}</div>` +
+            `<div class="search-hit-meta">${esc(meta)}</div>` +
+            (hit.snippet ? `<div class="search-hit-snippet">${esc(hit.snippet)}</div>` : "") +
+            (reasons ? `<div class="search-hit-reasons">matched: ${esc(reasons)}</div>` : "");
+          searchResultsList.appendChild(div);
+        });
+        searchResultsCard.style.display = "block";
+      } catch (e) {
+        errEl.textContent = e.message || String(e);
+        errEl.style.display = "block";
+      } finally {
+        searchBtn.disabled = false;
+        deepBtn.disabled = false;
+        searchBtn.innerHTML = "<span>Fast Search</span>";
+      }
+    }
+
+    async function doDeepAnswer() {
+      const q = qEl.value.trim();
+      const rawVideos = vidEl.value.trim();
+      resetUiForQuery();
+
+      if (!q) {
+        errEl.textContent = "Please enter a question.";
+        errEl.style.display = "block";
+        return;
+      }
+
+      deepBtn.disabled = true;
+      searchBtn.disabled = true;
+      deepBtn.textContent = "Thinking...";
+      try {
+        const video_ids = parseVideoIds(rawVideos);
         console.log("[ask-ui] Sending /api/ask_v2 with question:", q, "video_ids:", video_ids);
         const resp = await fetch("/api/ask_v2", {
           method: "POST",
@@ -554,8 +678,9 @@
             statusLine.textContent = "";
             errEl.textContent = "Timed out waiting for Ask Shorty to finish. Please try again.";
             errEl.style.display = "block";
-            askBtn.disabled = false;
-            askBtn.textContent = "Ask Shorty";
+            deepBtn.disabled = false;
+            searchBtn.disabled = false;
+            deepBtn.innerHTML = "<span>Deep Answer</span>";
             return;
           }
 
@@ -582,8 +707,8 @@
               statusLine.textContent = "";
               errEl.textContent = msg;
               errEl.style.display = "block";
-              askBtn.disabled = false;
-              askBtn.textContent = "Ask Shorty";
+              deepBtn.disabled = false;
+              deepBtn.innerHTML = "<span>Deep Answer</span>";
               console.log("[ask-ui] Job completed with error:", msg);
               return;
             }
@@ -633,15 +758,17 @@
             }
 
             answerCard.style.display = "block";
-            askBtn.disabled = false;
-            askBtn.textContent = "Ask Shorty";
+            deepBtn.disabled = false;
+            searchBtn.disabled = false;
+            deepBtn.innerHTML = "<span>Deep Answer</span>";
           } catch (err) {
             console.error("[ask-ui] Polling error:", err);
             statusLine.textContent = "";
             errEl.textContent = err.message || String(err);
             errEl.style.display = "block";
-            askBtn.disabled = false;
-            askBtn.textContent = "Ask Shorty";
+            deepBtn.disabled = false;
+            searchBtn.disabled = false;
+            deepBtn.innerHTML = "<span>Deep Answer</span>";
           }
         }
 
@@ -664,10 +791,16 @@
       if (pv) vidEl.value = pv;
     })();
 
-    askBtn.addEventListener("click", doAsk);
+    searchBtn.addEventListener("click", doFastSearch);
+    deepBtn.addEventListener("click", doDeepAnswer);
     qEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-        doAsk();
+      if (e.key !== "Enter") return;
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        doDeepAnswer();
+      } else if (!e.shiftKey) {
+        e.preventDefault();
+        doFastSearch();
       }
     });
   </script>

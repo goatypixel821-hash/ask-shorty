@@ -6,7 +6,8 @@ Routes:
 - GET /ask               -> HTML UI
 - POST /api/ask          -> enqueue question, return job_id (ref_id null until done)
 - GET /ask_v2            -> V2 UI (requires ASK_SHORTY_V2=true)
-- POST /api/ask_v2       -> V2 hierarchical RAG job queue
+- POST /api/ask_v2       -> V2 hierarchical RAG job queue (deep answer)
+- POST /api/search_fast  -> V2 local retrieval only (no LLM)
 - GET /api/ask/result/<job_id> -> poll for answer (includes ref_id when completed)
 - GET /api/ask/ref/<ref_id> -> fetch completed job by human-readable ref_id
 - GET /agent             -> Agent Mode UI
@@ -21,6 +22,7 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 
 import os
 import json
+import time
 import queue as _queue
 import secrets
 import string
@@ -126,6 +128,29 @@ def _startup_storage_diagnostic() -> None:
 
 
 _startup_storage_diagnostic()
+
+
+def _warm_v2_in_background() -> None:
+    """Preload V2 BM25 + memory maps without blocking Flask bind."""
+    if not _v2_flag_enabled():
+        return
+
+    def _run() -> None:
+        t0 = time.perf_counter()
+        try:
+            get_engine_v2()
+            ms = round((time.perf_counter() - t0) * 1000.0)
+            print(f"[Ask Shorty] V2 warmup complete in {ms}ms", flush=True)
+        except Exception as e:
+            print(
+                f"[Ask Shorty] V2 warmup failed (will retry on first query): {e!r}",
+                flush=True,
+            )
+
+    threading.Thread(target=_run, daemon=True, name="v2-warmup").start()
+
+
+_warm_v2_in_background()
 
 # Per-job SSE event queues.  Created in api_ask before the worker thread
 # starts so a client can connect immediately and receive every event.
@@ -1013,6 +1038,61 @@ def api_ask_v2():
     return jsonify({"success": True, "job_id": job_id, "ref_id": None})
 
 
+@app.route("/api/search_fast", methods=["POST"])
+def api_search_fast():
+    """
+    Synchronous local retrieval (V2 BM25 + segments). No LLM, no agent, no CE load.
+    """
+    if not _v2_flag_enabled():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "ASK_SHORTY_V2 is not enabled",
+                }
+            ),
+            503,
+        )
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get("question") or data.get("q") or "").strip()
+    video_ids = data.get("video_ids") or None
+    top_k = data.get("top_k") or data.get("limit")
+
+    if not question:
+        return jsonify({"success": False, "error": "Question is required"}), 400
+
+    t0 = time.perf_counter()
+    try:
+        engine = get_engine_v2()
+        sf_kwargs: Dict[str, object] = {"restrict_videos": video_ids}
+        if top_k is not None:
+            sf_kwargs["top_k"] = int(top_k)
+        payload = engine.search_fast(question, **sf_kwargs)  # type: ignore[arg-type]
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0)
+        q_log = question[:80].replace('"', "'")
+        print(
+            f'[Ask Shorty] fast_search query="{q_log}" failed after {elapsed_ms}ms: {e!r}',
+            flush=True,
+        )
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0)
+    n_results = len(payload.get("results") or [])
+    q_log = question[:80].replace('"', "'")
+    print(
+        f'[Ask Shorty] fast_search query="{q_log}" took {elapsed_ms}ms results={n_results}',
+        flush=True,
+    )
+    return jsonify(
+        {
+            "success": True,
+            "elapsed_ms": elapsed_ms,
+            **payload,
+        }
+    )
+
+
 @app.route("/api/agent/ask", methods=["POST"])
 def api_agent_ask():
     data = request.get_json(force=True, silent=True) or {}
@@ -1652,6 +1732,63 @@ def debug_video(video_id: str):
         entities=entities,
     )
 
+
+def _log_registered_api_routes() -> None:
+    """Startup diagnostic: confirm Fast Search and other API routes are on this app instance."""
+    api_rules = sorted(
+        {
+            r.rule
+            for r in app.url_map.iter_rules()
+            if r.rule.startswith("/api/")
+        }
+    )
+    has_fast = "/api/search_fast" in api_rules
+    has_v2 = "/api/ask_v2" in api_rules
+    here = Path(__file__).resolve()
+    print(
+        f"[ask-shorty-app] loaded {here}",
+        flush=True,
+    )
+    print(
+        f"[ask-shorty-app] /api/search_fast registered={has_fast} "
+        f"| /api/ask_v2 registered={has_v2}",
+        flush=True,
+    )
+    if not has_fast:
+        print(
+            "[ask-shorty-app] WARNING: /api/search_fast missing — "
+            "stop the old server and restart: python ask_shorty_app.py",
+            flush=True,
+        )
+    print(
+        "[ask-shorty-app] API routes: " + ", ".join(api_rules),
+        flush=True,
+    )
+
+
+@app.errorhandler(404)
+def _api_json_not_found(e):
+    """Return JSON (not HTML) for unknown /api/* paths."""
+    path = (request.path or "").strip()
+    if path.startswith("/api/"):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": f"API route not found: {path}",
+                    "hint": (
+                        "Restart Ask Shorty from ask_shorty_app.py if you "
+                        "recently added routes. On startup you should see "
+                        "/api/search_fast registered=True."
+                    ),
+                }
+            ),
+            404,
+        )
+    return e
+
+
+_log_registered_api_routes()
 
 if __name__ == "__main__":
     # Disable the Flask reloader on Windows to avoid noisy socket errors.

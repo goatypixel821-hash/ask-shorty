@@ -40,6 +40,15 @@ EVENT_TOP = 12
 RERANK_POOL = 100
 # Cross-encoder is O(n) in batch size; keep n small for sub‑second latency.
 CROSS_ENCODER_MAX_CANDIDATES = max(1, int(os.environ.get("V2_CROSS_ENCODER_MAX", "20")))
+
+# Fast search (POST /api/search_fast): no LLM, no CE; tighter caps for interactive latency.
+FAST_SEARCH_TOP_K = max(5, int(os.environ.get("V2_FAST_SEARCH_TOP_K", "20")))
+FAST_VIDEO_BM25_TOP_K = 50
+FAST_VIDEO_CAND_CAP = 50
+FAST_SEGMENT_BM25_TOP_K = 80
+FAST_SEGMENT_RESCUE_VIDEO_TOP = 10
+FAST_SEGMENT_RESCUE_SEGMENT_PER_QUERY = 150
+FAST_SEGMENT_RESCUE_REPLACE_COUNT = 5
 # Skip CE when top video BM25 clearly dominates mid-ranked scores (saves ~seconds).
 CE_SKIP_BM25_DOMINANCE_RATIO = float(os.environ.get("V2_CE_SKIP_BM25_RATIO", "1.42"))
 CE_SKIP_BM25_MIN_TOP_SCORE = float(os.environ.get("V2_CE_SKIP_BM25_MIN_TOP", "3.5"))
@@ -637,14 +646,33 @@ class AskShortyV2:
         self,
         question: str,
         restrict_videos: Optional[Sequence[str]] = None,
+        *,
+        fast_mode: bool = False,
+        fast_top_k: int = FAST_SEARCH_TOP_K,
     ) -> Tuple[List[str], Dict[str, Any]]:
-        """Hierarchical retrieval (steps 1–6). Uses a small LLM call for BM25 query variants."""
+        """Hierarchical retrieval (steps 1–6). Uses LLM query variants unless fast_mode."""
         t_retrieve0 = time.perf_counter()
 
         def _ms_since(t: float) -> float:
             return round((time.perf_counter() - t) * 1000.0, 2)
 
         timing: Dict[str, Any] = {}
+        if fast_mode:
+            v_bm25_top = FAST_VIDEO_BM25_TOP_K
+            v_cand_cap = FAST_VIDEO_CAND_CAP
+            seg_rescue_n = FAST_SEGMENT_RESCUE_VIDEO_TOP
+            seg_rescue_per_q = FAST_SEGMENT_RESCUE_SEGMENT_PER_QUERY
+            seg_rescue_replace = FAST_SEGMENT_RESCUE_REPLACE_COUNT
+            seg_bm25_top_k = FAST_SEGMENT_BM25_TOP_K
+            rerank_pool = max(1, int(fast_top_k))
+        else:
+            v_bm25_top = VIDEO_BM25_TOP_K
+            v_cand_cap = VIDEO_CAND_MERGED_CAP
+            seg_rescue_n = SEGMENT_RESCUE_VIDEO_TOP
+            seg_rescue_per_q = SEGMENT_RESCUE_SEGMENT_PER_QUERY
+            seg_rescue_replace = SEGMENT_RESCUE_REPLACE_COUNT
+            seg_bm25_top_k = SEGMENT_BM25_TOP_K
+            rerank_pool = RERANK_POOL
 
         t_lazy = time.perf_counter()
         self._lazy_load()
@@ -657,19 +685,24 @@ class AskShortyV2:
         route_res = self.router.classify(q)
         route = route_res.route_type
         timing["classify_ms"] = _ms_since(t_cl)
-        print(
-            f"[ask_shorty_v2] V2 route={route!r} reason={route_res.reason!r}",
-            flush=True,
-        )
+        if not fast_mode:
+            print(
+                f"[ask_shorty_v2] V2 route={route!r} reason={route_res.reason!r}",
+                flush=True,
+            )
 
         t_exp = time.perf_counter()
-        try:
-            query_variants = _expand_query(q) if q else []
-        except Exception:
+        if fast_mode:
             query_variants = [q] if q else []
-        if q and not query_variants:
-            query_variants = [q]
-        timing["query_expand_ms"] = _ms_since(t_exp)
+            timing["query_expand_ms"] = 0.0
+        else:
+            try:
+                query_variants = _expand_query(q) if q else []
+            except Exception:
+                query_variants = [q] if q else []
+            if q and not query_variants:
+                query_variants = [q]
+            timing["query_expand_ms"] = _ms_since(t_exp)
 
         instant: List[str] = []
         if self._maps:
@@ -681,18 +714,18 @@ class AskShortyV2:
         vid_ranked: List[Tuple[str, float]] = []
         if self._video_bm25 and query_variants:
             per_vid = [
-                self._video_bm25.search(sq, VIDEO_BM25_TOP_K) for sq in query_variants
+                self._video_bm25.search(sq, v_bm25_top) for sq in query_variants
             ]
-            vid_ranked = _merge_video_bm25_scores(per_vid, VIDEO_BM25_TOP_K)
+            vid_ranked = _merge_video_bm25_scores(per_vid, v_bm25_top)
         elif self._video_bm25 and q:
-            vid_ranked = self._video_bm25.search(q, VIDEO_BM25_TOP_K)
+            vid_ranked = self._video_bm25.search(q, v_bm25_top)
 
         # Video BM25 first — instant RAM hits (topic bigrams like "rather than") can
         # flood the cap and exclude strong BM25 matches (eval showed this for exoplanet).
         ordered: List[str] = []
         seen: Set[str] = set()
         for vid, _ in vid_ranked:
-            if len(ordered) >= VIDEO_CAND_MERGED_CAP:
+            if len(ordered) >= v_cand_cap:
                 break
             if restrict and vid not in restrict:
                 continue
@@ -700,7 +733,7 @@ class AskShortyV2:
                 seen.add(vid)
                 ordered.append(vid)
         for vid in instant:
-            if len(ordered) >= VIDEO_CAND_MERGED_CAP:
+            if len(ordered) >= v_cand_cap:
                 break
             if restrict and vid not in restrict:
                 continue
@@ -715,8 +748,8 @@ class AskShortyV2:
         rescue_vids = _segment_rescue_top_videos(
             self._seg_bm25,
             rescue_qs,
-            n_videos=SEGMENT_RESCUE_VIDEO_TOP,
-            segments_per_query=SEGMENT_RESCUE_SEGMENT_PER_QUERY,
+            n_videos=seg_rescue_n,
+            segments_per_query=seg_rescue_per_q,
         )
         video_bm25_by_pool = {v: float(s) for v, s in vid_ranked}
         rescue_incoming: List[str] = []
@@ -726,8 +759,8 @@ class AskShortyV2:
             if vid not in seen:
                 rescue_incoming.append(vid)
 
-        if len(ordered) >= VIDEO_CAND_MERGED_CAP and rescue_incoming:
-            n_replace = min(SEGMENT_RESCUE_REPLACE_COUNT, len(rescue_incoming))
+        if len(ordered) >= v_cand_cap and rescue_incoming:
+            n_replace = min(seg_rescue_replace, len(rescue_incoming))
             victims = sorted(
                 ordered, key=lambda v: video_bm25_by_pool.get(v, 0.0)
             )[:n_replace]
@@ -740,7 +773,7 @@ class AskShortyV2:
                 ordered.append(vid)
         else:
             for vid in rescue_incoming:
-                if len(ordered) >= VIDEO_CAND_MERGED_CAP:
+                if len(ordered) >= v_cand_cap:
                     break
                 seen.add(vid)
                 ordered.append(vid)
@@ -768,10 +801,12 @@ class AskShortyV2:
                 "segment_rescue_added": timing.get("segment_rescue_added", 0),
                 "segment_rescue_top_video_ids": rescue_vids,
                 "segment_bm25_pairs_scored": 0,
-                "segment_bm25_top_k_cap": SEGMENT_BM25_TOP_K,
+                "segment_bm25_top_k_cap": seg_bm25_top_k,
                 "segments_kept_total": 0,
                 "segment_hits": {},
                 "pool_size": 0,
+                "fast_mode": fast_mode,
+                "instant_candidate_ids": list(instant),
                 "timing_ms": timing,
                 "note": "empty candidate pool",
             }
@@ -782,13 +817,13 @@ class AskShortyV2:
         if self._seg_bm25:
             if query_variants:
                 per_seg = [
-                    self._seg_bm25.search_in_video_subset(sq, allowed, SEGMENT_BM25_TOP_K)
+                    self._seg_bm25.search_in_video_subset(sq, allowed, seg_bm25_top_k)
                     for sq in query_variants
                 ]
-                seg_pairs = _merge_segment_bm25_scores(per_seg, SEGMENT_BM25_TOP_K)
+                seg_pairs = _merge_segment_bm25_scores(per_seg, seg_bm25_top_k)
             else:
                 seg_pairs = self._seg_bm25.search_in_video_subset(
-                    q, allowed, SEGMENT_BM25_TOP_K
+                    q, allowed, seg_bm25_top_k
                 )
             n_seg_pairs = len(seg_pairs)
             pls = self._seg_bm25.payload
@@ -825,12 +860,17 @@ class AskShortyV2:
             hits = seg_hits.get(vid) or []
             return max((sc for _sid, sc in hits), default=0.0)
 
-        bm25_skip, bm25_detail = _bm25_confidence_skip_cross_encoder(vid_ranked)
+        bm25_skip, bm25_detail = (
+            (True, "fast_mode")
+            if fast_mode
+            else _bm25_confidence_skip_cross_encoder(vid_ranked)
+        )
         skip_watch = (
-            route == "topic_lookup"
+            not fast_mode
+            and route == "topic_lookup"
             and route_res.topic_watch_sort in ("oldest_first", "recent_first")
         )
-        skip_ce_fast_path = skip_watch or bm25_skip
+        skip_ce_fast_path = fast_mode or skip_watch or bm25_skip
 
         skip_bits: List[str] = []
         if skip_watch:
@@ -853,7 +893,7 @@ class AskShortyV2:
             timing["pool_build_sql_ms"] = 0.0
             timing["cross_encoder_ms"] = 0.0
             timing["cross_encoder_input_count"] = 0
-            cap = min(RERANK_POOL, len(ordered))
+            cap = min(rerank_pool, len(ordered))
             base = ordered[:cap]
             merge_pos = {vid: i for i, vid in enumerate(base)}
             out_videos = sorted(
@@ -921,9 +961,9 @@ class AskShortyV2:
                 ranked_ce = [vid for vid, _ in scored]
                 seen_ce = set(ranked_ce)
                 tail = [v for v in ordered if v not in seen_ce]
-                out_videos = (ranked_ce + tail)[:RERANK_POOL]
+                out_videos = (ranked_ce + tail)[:rerank_pool]
             else:
-                out_videos = ordered[:RERANK_POOL]
+                out_videos = ordered[:rerank_pool]
             timing["cross_encoder_ms"] = _ms_since(t_ce)
 
         topic_watch_sort = route_res.topic_watch_sort or "recent_first"
@@ -1001,13 +1041,15 @@ class AskShortyV2:
             "video_bm25_ranked_count": len(vid_ranked),
             "merged_candidate_count": len(allowed),
             "segment_bm25_pairs_scored": n_seg_pairs,
-            "segment_bm25_top_k_cap": SEGMENT_BM25_TOP_K,
+            "segment_bm25_top_k_cap": seg_bm25_top_k,
             "segments_kept_total": segments_kept_total,
             "video_bm25_top": [v for v, _ in vid_ranked[:8]],
             "video_bm25_scores": video_bm25_by,
             "rank_scores": rank_scores,
             "pool_size": len(out_videos),
             "segment_hits": seg_pick,
+            "fast_mode": fast_mode,
+            "instant_candidate_ids": list(instant),
             "topic_lookup_sorted_by_watch_date": bool(
                 route == "topic_lookup" and len(out_videos) > 0
             ),
@@ -1017,6 +1059,167 @@ class AskShortyV2:
             "timing_ms": timing,
         }
         return out_videos, debug
+
+    def search_fast(
+        self,
+        question: str,
+        restrict_videos: Optional[Sequence[str]] = None,
+        top_k: int = FAST_SEARCH_TOP_K,
+    ) -> Dict[str, Any]:
+        """
+        Local retrieval only: no LLM, no cross-encoder load/use.
+        Returns ranked video hits with metadata and best snippet.
+        """
+        top_k = max(1, min(int(top_k), 50))
+        ranked, dbg = self.retrieve_videos(
+            question,
+            restrict_videos=restrict_videos,
+            fast_mode=True,
+            fast_top_k=top_k,
+        )
+        return self._format_fast_search_results(
+            question, ranked[:top_k], dbg, top_k=top_k
+        )
+
+    def _format_fast_search_results(
+        self,
+        question: str,
+        ranked: List[str],
+        dbg: Dict[str, Any],
+        *,
+        top_k: int,
+    ) -> Dict[str, Any]:
+        q = (question or "").strip()
+        title_toks = {
+            t
+            for t in re.findall(r"[A-Za-z0-9]+", q.lower())
+            if len(t) >= 3
+        }
+        instant_set = set(dbg.get("instant_candidate_ids") or [])
+        rescue_set = set(dbg.get("segment_rescue_top_video_ids") or [])
+        video_bm25_by: Dict[str, float] = dict(dbg.get("video_bm25_scores") or {})
+        rank_scores: Dict[str, float] = dict(dbg.get("rank_scores") or {})
+        seg_hits: Dict[str, List[str]] = dict(dbg.get("segment_hits") or {})
+        route = dbg.get("route_type") or "general"
+
+        results: List[Dict[str, Any]] = []
+        if not ranked:
+            return {
+                "query": q,
+                "route_type": route,
+                "route_reason": dbg.get("route_reason"),
+                "results": [],
+                "timing_ms": dbg.get("timing_ms") or {},
+                "top_k": top_k,
+            }
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            ph = ",".join("?" * len(ranked))
+            meta_by: Dict[str, sqlite3.Row] = {}
+            cur.execute(
+                f"""
+                SELECT v.video_id, v.title, v.channel, v.watch_date,
+                       COALESCE(t.shorty, '') AS shorty
+                FROM videos v
+                LEFT JOIN transcripts t ON t.video_id = v.video_id
+                WHERE v.video_id IN ({ph})
+                """,
+                tuple(ranked),
+            )
+            for row in cur.fetchall():
+                meta_by[str(row["video_id"])] = row
+
+            seg_detail: Dict[str, Dict[str, Any]] = {}
+            for vid in ranked:
+                sids = seg_hits.get(vid) or []
+                if not sids:
+                    continue
+                sid = int(sids[0])
+                cur.execute(
+                    """
+                    SELECT segment_id, start_s, end_s, summary
+                    FROM segment_index WHERE segment_id = ?
+                    """,
+                    (sid,),
+                )
+                sr = cur.fetchone()
+                if sr:
+                    seg_detail[vid] = dict(sr)
+
+        for vid in ranked:
+            row = meta_by.get(vid)
+            title = ((row["title"] or "") if row else "") or vid
+            channel = (row["channel"] or "") if row else ""
+            watched = (row["watch_date"] or "") if row else ""
+            shorty = (row["shorty"] or "") if row else ""
+            wd = str(watched or "")[:10] if watched else ""
+
+            reasons: List[str] = []
+            if vid in instant_set:
+                reasons.append("entity_or_topic")
+            vb = float(video_bm25_by.get(vid, 0.0))
+            if vb > 0:
+                reasons.append("video_bm25")
+            if vid in rescue_set:
+                reasons.append("segment_rescue")
+            if seg_hits.get(vid):
+                reasons.append("segment_bm25")
+            title_low = (title or "").lower()
+            if title_toks and any(t in title_low for t in title_toks):
+                reasons.append("title_match")
+
+            seg = seg_detail.get(vid)
+            snippet = ""
+            snippet_type = "shorty"
+            timestamp_range = None
+            segment_id = None
+            if seg and (seg.get("summary") or "").strip():
+                snippet = (seg["summary"] or "").strip()[:400]
+                snippet_type = "segment"
+                segment_id = int(seg["segment_id"])
+                t0 = float(seg.get("start_s") or 0)
+                t1 = float(seg.get("end_s") or 0)
+                timestamp_range = f"{t0:.0f}-{t1:.0f}s"
+            elif shorty:
+                snippet = shorty.strip()[:400]
+                snippet_type = "shorty"
+
+            score = float(rank_scores.get(vid, vb))
+            if seg_hits.get(vid) and snippet_type == "segment":
+                score_source = "segment_bm25"
+            elif vb > 0:
+                score_source = "video_bm25"
+            elif vid in instant_set:
+                score_source = "entity_or_topic"
+            else:
+                score_source = "merged_rank"
+
+            results.append(
+                {
+                    "video_id": vid,
+                    "title": title,
+                    "channel": channel,
+                    "watch_date": wd or None,
+                    "score": round(score, 4),
+                    "score_source": score_source,
+                    "match_reasons": reasons or ["merged_rank"],
+                    "snippet": snippet,
+                    "snippet_type": snippet_type,
+                    "timestamp_range": timestamp_range,
+                    "segment_id": segment_id,
+                }
+            )
+
+        return {
+            "query": q,
+            "route_type": route,
+            "route_reason": dbg.get("route_reason"),
+            "results": results,
+            "timing_ms": dbg.get("timing_ms") or {},
+            "top_k": top_k,
+        }
 
     def answer(
         self,
