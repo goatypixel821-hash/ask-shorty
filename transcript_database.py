@@ -6,6 +6,9 @@ Creates and manages SQLite database for YouTube video transcripts + Shorties + e
 
 import sqlite3
 import os
+import json
+import time
+from contextlib import closing
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -306,6 +309,29 @@ class TranscriptDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_events_video_id ON events(video_id)"
             )
 
+            # User watch-time marks (extension / annotate API) — append-only
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS video_annotations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id TEXT NOT NULL,
+                    timestamp_seconds REAL NOT NULL,
+                    note_text TEXT,
+                    tags TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(video_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_annotations_video_id
+                ON video_annotations(video_id)
+                """
+            )
+
+            conn.execute("PRAGMA journal_mode=WAL")
+
             conn.commit()
             print(
                 f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -335,6 +361,123 @@ class TranscriptDatabase:
         except Exception as e:
             print(f"[ERROR] Error adding video {video_id}: {e}")
             return False
+
+    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=timeout)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def video_exists(self, video_id: str) -> bool:
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM videos WHERE video_id = ? LIMIT 1", (video_id,))
+            return cur.fetchone() is not None
+
+    def ensure_bare_video(
+        self,
+        video_id: str,
+        title: str,
+        channel: str,
+        url: str,
+    ) -> bool:
+        """
+        Insert a videos row only if missing (has_transcript=false).
+        Returns True if a new row was created.
+        """
+        if self.video_exists(video_id):
+            return False
+        try:
+            local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with closing(self._connect()) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO videos (
+                        video_id, title, channel, url,
+                        has_transcript, created_at
+                    )
+                    VALUES (?, ?, ?, ?, FALSE, ?)
+                    """,
+                    (video_id, title, channel, url, local_time),
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[ERROR] ensure_bare_video {video_id}: {e}")
+            return False
+
+    def insert_annotation(
+        self,
+        video_id: str,
+        timestamp_seconds: float,
+        note_text: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        *,
+        max_attempts: int = 3,
+    ) -> Optional[int]:
+        """Insert a watch-time annotation; retries on database locked."""
+        tags_json = json.dumps(tags or [])
+        note = (note_text or "").strip() or None
+        last_err: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                with closing(self._connect()) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO video_annotations (
+                            video_id, timestamp_seconds, note_text, tags
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (video_id, float(timestamp_seconds), note, tags_json),
+                    )
+                    conn.commit()
+                    return int(cur.lastrowid)
+            except sqlite3.OperationalError as e:
+                last_err = e
+                if "locked" not in str(e).lower():
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+            except Exception as e:
+                print(f"[ERROR] insert_annotation {video_id}: {e}")
+                return None
+        if last_err:
+            print(f"[ERROR] insert_annotation {video_id} locked after retries: {last_err}")
+        return None
+
+    def get_distinct_annotation_tags(self) -> List[str]:
+        """Distinct tags from all annotations (sorted)."""
+        seen: set = set()
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT tags FROM video_annotations WHERE tags IS NOT NULL AND trim(tags) != ''"
+            )
+            for (raw,) in cur.fetchall():
+                try:
+                    arr = json.loads(raw or "[]")
+                    if isinstance(arr, list):
+                        for t in arr:
+                            s = str(t).strip()
+                            if s:
+                                seen.add(s)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        return sorted(seen, key=lambda x: x.lower())
+
+    def count_annotations(self, video_id: Optional[str] = None) -> int:
+        with closing(self._connect()) as conn:
+            cur = conn.cursor()
+            if video_id:
+                cur.execute(
+                    "SELECT COUNT(*) FROM video_annotations WHERE video_id = ?",
+                    (video_id,),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) FROM video_annotations")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
 
     def has_transcript(self, video_id: str) -> bool:
         """Check if video has a transcript"""
