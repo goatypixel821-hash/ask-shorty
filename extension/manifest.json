@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Shorty Watch Tags",
+  "version": "1.0.0",
+  "description": "Tag and note timestamps while watching YouTube (saves to local Shorty grabber).",
+  "host_permissions": ["http://localhost:5000/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

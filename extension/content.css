@@ -1,0 +1,176 @@
+#shorty-mark-root {
+  position: absolute;
+  z-index: 99999;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  pointer-events: none;
+}
+
+#shorty-mark-root * {
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+#shorty-mark-fab {
+  position: absolute;
+  right: 12px;
+  bottom: 56px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(22, 163, 74, 0.92);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  opacity: 0.85;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+#shorty-mark-fab:hover {
+  opacity: 1;
+  transform: scale(1.06);
+}
+
+#shorty-mark-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100000;
+}
+
+#shorty-mark-panel {
+  background: #1e293b;
+  color: #f1f5f9;
+  border: 1px solid #475569;
+  border-radius: 12px;
+  padding: 14px 16px;
+  width: min(360px, 92vw);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+#shorty-mark-panel h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+#shorty-mark-note {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 14px;
+  resize: vertical;
+}
+
+#shorty-mark-tags-wrap {
+  margin-top: 10px;
+  position: relative;
+}
+
+#shorty-mark-tags {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+
+#shorty-mark-tag-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  display: none;
+  z-index: 1;
+}
+
+#shorty-mark-tag-list.open {
+  display: block;
+}
+
+#shorty-mark-tag-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#shorty-mark-tag-list button:hover {
+  background: #1e293b;
+}
+
+#shorty-mark-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+#shorty-mark-actions button {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#shorty-mark-cancel {
+  background: #334155;
+  color: #e2e8f0;
+}
+
+#shorty-mark-save {
+  background: #16a34a;
+  color: #fff;
+  font-weight: 600;
+}
+
+#shorty-mark-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #475569;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  z-index: 100001;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+
+#shorty-mark-toast.show {
+  opacity: 1;
+}
+
+#shorty-mark-toast.err {
+  border-color: #f87171;
+  color: #fecaca;
+}
