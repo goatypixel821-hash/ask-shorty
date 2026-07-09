@@ -4,6 +4,9 @@
   const GRABBER = "http://localhost:5000";
   const DEFAULT_TAGS = ["idea", "quote", "important", "todo"];
   const HOTKEY = { alt: true, shift: true, key: "m" }; // Alt+Shift+M
+  const FAB_SIZE = 42;
+  const FAB_MARGIN_RIGHT = 14;
+  const FAB_MARGIN_BOTTOM = 58; // above YouTube control bar
 
   let root = null;
   let fab = null;
@@ -39,6 +42,15 @@
 
   function getVideoEl() {
     return document.querySelector("video.html5-main-video") || document.querySelector("video");
+  }
+
+  function findPlayerEl() {
+    return (
+      document.querySelector("#movie_player") ||
+      document.querySelector(".html5-video-player") ||
+      document.querySelector("#ytd-player #container") ||
+      document.querySelector("#ytd-player")
+    );
   }
 
   function formatTime(sec) {
@@ -88,76 +100,108 @@
       .filter(Boolean);
   }
 
-  function ensureUi() {
-    const player =
-      document.querySelector("#movie_player") ||
-      document.querySelector(".html5-video-player") ||
-      document.querySelector("#ytd-player");
-    if (!player) return false;
+  function positionFab() {
+    if (!root || !fab) return;
+    if (!parseVideoId()) {
+      root.style.display = "none";
+      return;
+    }
+    const player = findPlayerEl();
+    if (!player) {
+      root.style.display = "none";
+      return;
+    }
+    const r = player.getBoundingClientRect();
+    if (r.width < 120 || r.height < 80) {
+      root.style.display = "none";
+      return;
+    }
+    const left = r.right - FAB_MARGIN_RIGHT - FAB_SIZE;
+    const top = r.bottom - FAB_MARGIN_BOTTOM - FAB_SIZE;
+    root.style.display = "block";
+    root.style.left = `${Math.max(8, left)}px`;
+    root.style.top = `${Math.max(8, top)}px`;
+    root.style.width = `${FAB_SIZE}px`;
+    root.style.height = `${FAB_SIZE}px`;
+  }
 
-    if (!root || !player.contains(root)) {
+  function ensureFab() {
+    if (!root) {
       root = document.createElement("div");
       root.id = "shorty-mark-root";
-      player.appendChild(root);
+      document.body.appendChild(root);
 
       fab = document.createElement("button");
       fab.id = "shorty-mark-fab";
       fab.type = "button";
       fab.title = "Mark this moment (Alt+Shift+M)";
       fab.textContent = "✦";
+      fab.setAttribute("aria-label", "Mark this moment");
       fab.addEventListener("click", (e) => {
+        e.preventDefault();
         e.stopPropagation();
         openOverlay();
       });
       root.appendChild(fab);
     }
-    return true;
+    positionFab();
   }
 
   function closeOverlay() {
     const ov = document.getElementById("shorty-mark-overlay");
     if (ov) ov.remove();
     overlayOpen = false;
+    positionFab();
+  }
+
+  function readCurrentTimestamp() {
+    const video = getVideoEl();
+    return video ? video.currentTime : 0;
   }
 
   async function openOverlay() {
-    if (overlayOpen) return;
+    if (overlayOpen) {
+      closeOverlay();
+    }
     const vid = parseVideoId();
     if (!vid) {
       showToast("Not a YouTube watch page", true);
       return;
     }
-    const video = getVideoEl();
-    if (!video) {
+    if (!getVideoEl()) {
       showToast("Video player not found", true);
       return;
     }
-    frozenTimestamp = video.currentTime;
+    frozenTimestamp = readCurrentTimestamp();
     overlayOpen = true;
+    if (root) root.style.display = "none";
 
     const tags = await fetchTags();
 
     const overlay = document.createElement("div");
     overlay.id = "shorty-mark-overlay";
-    overlay.innerHTML = `
-      <div id="shorty-mark-panel" role="dialog" aria-label="Mark moment">
-        <h3>Mark at ${formatTime(frozenTimestamp)}</h3>
-        <textarea id="shorty-mark-note" placeholder="Note (optional)…" rows="3"></textarea>
-        <div id="shorty-mark-tags-wrap">
-          <input id="shorty-mark-tags" type="text" placeholder="Tags: idea, todo (comma-separated)" autocomplete="off" />
-          <div id="shorty-mark-tag-list"></div>
-        </div>
-        <div id="shorty-mark-actions">
-          <button type="button" id="shorty-mark-cancel">Cancel</button>
-          <button type="button" id="shorty-mark-save">Save mark</button>
-        </div>
+    const panel = document.createElement("div");
+    panel.id = "shorty-mark-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "Mark moment");
+    panel.innerHTML = `
+      <h3>Mark at ${formatTime(frozenTimestamp)}</h3>
+      <textarea id="shorty-mark-note" placeholder="Note (optional)…" rows="3"></textarea>
+      <div id="shorty-mark-tags-wrap">
+        <input id="shorty-mark-tags" type="text" placeholder="Tags: idea, todo (comma-separated)" autocomplete="off" />
+        <div id="shorty-mark-tag-list"></div>
+      </div>
+      <div id="shorty-mark-actions">
+        <button type="button" id="shorty-mark-cancel">Cancel</button>
+        <button type="button" id="shorty-mark-save">Save mark</button>
       </div>
     `;
+    overlay.appendChild(panel);
     document.body.appendChild(overlay);
 
-    const noteEl = overlay.querySelector("#shorty-mark-note");
-    const tagsEl = overlay.querySelector("#shorty-mark-tags");
-    const tagList = overlay.querySelector("#shorty-mark-tag-list");
+    const noteEl = panel.querySelector("#shorty-mark-note");
+    const tagsEl = panel.querySelector("#shorty-mark-tags");
+    const tagList = panel.querySelector("#shorty-mark-tag-list");
 
     function renderTagDropdown(filter) {
       tagList.innerHTML = "";
@@ -186,13 +230,12 @@
     tagsEl.addEventListener("focus", () => renderTagDropdown(tagsEl.value));
     tagsEl.addEventListener("input", () => renderTagDropdown(tagsEl.value));
 
-    overlay.querySelector("#shorty-mark-cancel").addEventListener("click", closeOverlay);
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) closeOverlay();
-    });
+    panel.querySelector("#shorty-mark-cancel").addEventListener("click", closeOverlay);
+    panel.addEventListener("click", (e) => e.stopPropagation());
+    overlay.addEventListener("click", () => closeOverlay());
 
     async function submit() {
-      const saveBtn = overlay.querySelector("#shorty-mark-save");
+      const saveBtn = panel.querySelector("#shorty-mark-save");
       saveBtn.disabled = true;
       const payload = {
         video_id: vid,
@@ -218,8 +261,9 @@
           throw new Error(data.error || `HTTP ${r.status}`);
         }
         cachedTags = null;
+        const savedAt = formatTime(frozenTimestamp);
         closeOverlay();
-        showToast(`Marked at ${formatTime(frozenTimestamp)}`);
+        showToast(`Marked at ${savedAt} — click ✦ for another`);
       } catch (err) {
         clearTimeout(timer);
         const msg =
@@ -231,7 +275,7 @@
       }
     }
 
-    overlay.querySelector("#shorty-mark-save").addEventListener("click", submit);
+    panel.querySelector("#shorty-mark-save").addEventListener("click", submit);
 
     noteEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -240,7 +284,7 @@
       }
     });
 
-    overlay.addEventListener("keydown", (e) => {
+    panel.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
         closeOverlay();
@@ -267,11 +311,13 @@
   );
 
   function tick() {
-    ensureUi();
+    ensureFab();
   }
 
   tick();
-  setInterval(tick, 2000);
+  setInterval(tick, 1000);
+  window.addEventListener("resize", positionFab, { passive: true });
+  window.addEventListener("scroll", positionFab, { passive: true });
   const obs = new MutationObserver(tick);
   obs.observe(document.body, { childList: true, subtree: true });
 })();
