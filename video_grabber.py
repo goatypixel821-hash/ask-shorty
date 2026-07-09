@@ -412,6 +412,8 @@ def root():
             'save': '/api/save-transcript (POST)',
             'fetch': '/api/fetch-transcript (POST)',
             'save_pasted': '/api/save-pasted-transcript (POST)',
+            'annotate': '/api/annotate (POST)',
+            'tags': '/api/tags (GET)',
             'health': '/health',
             'status': '/api/status'
         }
@@ -616,6 +618,84 @@ def api_save_pasted_transcript():
         })
     except Exception as e:
         logger.error(f"save-pasted-transcript: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/annotate', methods=['POST', 'OPTIONS'])
+def api_annotate():
+    """Watch-time mark: video_id + timestamp + note + tags (no transcript required)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        video_id = (data.get('video_id') or '').strip()
+        url = (data.get('url') or '').strip()
+        title = (data.get('title') or '').strip() or 'Untitled'
+        channel = (data.get('channel') or '').strip() or 'Unknown channel'
+        note_text = data.get('note_text')
+        tags_raw = data.get('tags')
+
+        if not video_id and url:
+            video_id = _extract_video_id(url) or ''
+        if not video_id:
+            return jsonify({'success': False, 'error': 'video_id is required'}), 400
+
+        ts = data.get('timestamp_seconds')
+        if ts is None:
+            return jsonify({'success': False, 'error': 'timestamp_seconds is required'}), 400
+        try:
+            timestamp_seconds = float(ts)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'timestamp_seconds must be a number'}), 400
+        if timestamp_seconds < 0:
+            return jsonify({'success': False, 'error': 'timestamp_seconds must be >= 0'}), 400
+
+        tags: list = []
+        if isinstance(tags_raw, list):
+            tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+
+        canonical_url = url if url else f'https://www.youtube.com/watch?v={video_id}'
+
+        video_created = db.ensure_bare_video(video_id, title, channel, canonical_url)
+        if video_created:
+            try:
+                db.set_watch_date(video_id)
+            except Exception as e:
+                _out(f"Warning: failed to set watch_date for {video_id}: {e}")
+
+        ann_id = db.insert_annotation(
+            video_id,
+            timestamp_seconds,
+            note_text=note_text if note_text is not None else None,
+            tags=tags,
+        )
+        if ann_id is None:
+            return jsonify({'success': False, 'error': 'Failed to save annotation'}), 500
+
+        return jsonify({
+            'success': True,
+            'annotation_id': ann_id,
+            'video_created': video_created,
+            'video_id': video_id,
+            'timestamp_seconds': timestamp_seconds,
+            'note_text': (note_text or '').strip() or None,
+            'tags': tags,
+        })
+    except Exception as e:
+        logger.error(f"annotate: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/tags', methods=['GET', 'OPTIONS'])
+def api_tags():
+    """Distinct tags used in annotations (for extension dropdown)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        return jsonify({'tags': db.get_distinct_annotation_tags()})
+    except Exception as e:
+        logger.error(f"tags: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
