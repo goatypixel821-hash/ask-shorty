@@ -43,6 +43,7 @@ anthropic_key.txt
 # ── personal / machine-specific grabber scripts ───────────────────────────────
 video_grabber_personal.py
 start_grabber_personal.py
+local_yt_dlp_fetcher.py
 
 # ── video / demo / youtube content (kept local only) ────────────────────────
 ask_shorty_demo_video/

@@ -49,10 +49,65 @@ def after_request(response):
     return response
 
 base_dir = Path(__file__).resolve().parent
-db_path = base_dir / 'data' / 'transcripts.db'
 grab_log_path = base_dir / 'data' / 'grab_log.txt'
 
 _DEFAULT_OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct"
+
+
+def _out(msg: str) -> None:
+    line = msg + '\n'
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        grab_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(grab_log_path, 'a', encoding='utf-8') as f:
+            f.write(line)
+            f.flush()
+    except Exception:
+        pass
+
+
+def _resolve_db_path() -> tuple[Path, str]:
+    """
+    Pick the SQLite file the grabber uses.
+
+    Priority (after .env is loaded):
+    1. ASK_SHORTY_DB_PATH env var (from shell or .env)
+    2. <directory containing this video_grabber.py>/data/transcripts.db
+
+    Note: SHORTY_PROJECT_ROOT does not select the DB directly; it only helps load
+    shorty's .env and resolve batch_processor.py when the grabber script is run
+    from another checkout (e.g. youtube-history-viewer-copy).
+    """
+    env_raw = (os.environ.get("ASK_SHORTY_DB_PATH") or "").strip()
+    if env_raw:
+        return Path(env_raw).resolve(), "ASK_SHORTY_DB_PATH"
+    default = (base_dir / "data" / "transcripts.db").resolve()
+    return default, "base_dir/data/transcripts.db (next to this video_grabber.py)"
+
+
+def _log_db_path_resolution(db_path: Path, db_path_source: str) -> None:
+    sr = (os.environ.get("SHORTY_PROJECT_ROOT") or "").strip() or "(not set)"
+    line = (
+        "[grabber] db_path_resolved=%s | source=%s | video_grabber.py=%s | "
+        "SHORTY_PROJECT_ROOT=%s | cwd=%s"
+        % (
+            db_path,
+            db_path_source,
+            base_dir,
+            sr,
+            Path.cwd().resolve(),
+        )
+    )
+    logger.info(line)
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    _out(line)
 
 
 def _load_project_dotenv() -> None:
@@ -89,6 +144,20 @@ def _load_project_dotenv() -> None:
 
 
 _load_project_dotenv()
+
+db_path, _db_path_source = _resolve_db_path()
+_log_db_path_resolution(db_path, _db_path_source)
+
+try:
+    from local_yt_dlp_fetcher import VideoDownloader, YT_DLP_AVAILABLE
+    _LOCAL_YT_DLP_AVAILABLE = bool(YT_DLP_AVAILABLE)
+except ImportError:
+    VideoDownloader = None  # type: ignore[misc, assignment]
+    _LOCAL_YT_DLP_AVAILABLE = False
+
+_local_video_downloader = None
+if _LOCAL_YT_DLP_AVAILABLE and VideoDownloader is not None:
+    _local_video_downloader = VideoDownloader(str(base_dir / 'data' / 'downloads'))
 
 
 def _openrouter_key_status_line() -> str:
@@ -147,21 +216,6 @@ def _log_startup_openrouter_and_batch() -> None:
     # Same path as other grab lines (stderr + data/grab_log.txt); print alone is easy to miss if stdout is redirected.
     _out(line)
 
-
-def _out(msg: str):
-    line = msg + '\n'
-    try:
-        sys.stderr.write(line)
-        sys.stderr.flush()
-    except Exception:
-        pass
-    try:
-        grab_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(grab_log_path, 'a', encoding='utf-8') as f:
-            f.write(line)
-            f.flush()
-    except Exception:
-        pass
 
 db = TranscriptDatabase(str(db_path))
 rag = TranscriptRAG()
@@ -399,6 +453,108 @@ def _strip_timestamps_from_paste(text: str) -> str:
     return '\n\n'.join(lines) if lines else cleaned.strip()
 
 
+def _fetch_local_metadata(url: str) -> Optional[dict]:
+    """Fetch rich metadata via local yt-dlp module (personal use only)."""
+    if not _local_video_downloader:
+        return None
+    try:
+        _out("🔍 Fetching metadata...")
+        metadata = _local_video_downloader.fetch_metadata(url, quiet=True)
+        if metadata:
+            desc_len = len(metadata.get('description', '') or '')
+            tags_count = len(metadata.get('tags', []) or [])
+            _out(f"✅ Metadata saved: {desc_len} chars description, {tags_count} tags")
+        return metadata
+    except Exception as e:
+        _out(f"⚠️ Metadata fetch warning: {e}")
+        return None
+
+
+def _apply_local_metadata(
+    video_id: str,
+    url: str,
+    title: str,
+    channel: str,
+) -> tuple[Optional[dict], str, str]:
+    metadata = _fetch_local_metadata(url)
+    if metadata:
+        if metadata.get('title'):
+            title = metadata['title']
+        if metadata.get('channel'):
+            channel = metadata['channel']
+        try:
+            db.save_metadata(video_id, metadata)
+        except Exception as e:
+            logger.warning(f"fetch-transcript save_metadata: {e}")
+    return metadata, title, channel
+
+
+def _start_bookmarklet_background(
+    video_id: str,
+    transcript_success: bool,
+    metadata: Optional[dict],
+) -> None:
+    """Verbose background-work logging (matches pre-eea8f02 grabber)."""
+    _out("\n🚀 Starting background processing...")
+    if transcript_success:
+        _out("  → Vectorizing transcript (background)")
+        vectorize_video_in_background(video_id)
+        description = (metadata or {}).get('description', '') if metadata else ''
+        tags = (metadata or {}).get('tags', []) if metadata else []
+        if description or tags:
+            _out("  → Skipping categorization (not enabled in this grabber)")
+        else:
+            _out("  → Skipping categorization (no description/tags)")
+        _out("  → Enqueuing LLM tasks (Shorty, synthetic questions, entities)")
+        enqueue_llm_tasks_for_video(video_id)
+        _maybe_spawn_openrouter_pipeline(video_id)
+    else:
+        _out("  → Skipping vectorization (no transcript)")
+
+
+def _log_grab_summary(
+    video_id: str,
+    title: str,
+    channel: str,
+    transcript_success: bool,
+    metadata: Optional[dict],
+) -> None:
+    _out(f"\n✅ VIDEO GRABBED: {video_id}")
+    _out(f"   Title: {title}")
+    _out(f"   Channel: {channel or 'Unknown'}")
+    _out(f"   Transcript: {'✅' if transcript_success else '❌'}")
+    _out(f"   Metadata: {'✅' if metadata else '❌'}")
+    _out(f"{'='*60}\n")
+    logger.info(f"✅ Video grabbed: {video_id} - {title}")
+
+
+def _render_grab_page():
+    """Manual paste page (public / no-local-module fallback)."""
+    url = request.args.get('url', '').strip()
+    title = request.args.get('title', '').strip() or 'Untitled'
+    channel = request.args.get('channel', '').strip() or 'Unknown channel'
+
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return render_template(
+            'grab.html',
+            error='Invalid YouTube URL',
+            url=url,
+            title=title,
+            channel=channel,
+            video_id=None,
+        )
+
+    return render_template(
+        'grab.html',
+        url=url,
+        title=title,
+        channel=channel,
+        video_id=video_id,
+        error=None,
+    )
+
+
 # --- Routes ---
 
 @app.route('/')
@@ -408,7 +564,8 @@ def root():
         'status': 'running',
         'port': int(os.getenv('GRABBER_PORT', 5000)),
         'endpoints': {
-            'grab': '/grab (GET: url, title, channel as query params)',
+            'quick_fetch': '/tools/quick-fetch (GET: bookmarklet popup, auto-fetch when local module present)',
+            'grab': '/grab (GET: manual paste fallback)',
             'save': '/api/save-transcript (POST)',
             'fetch': '/api/fetch-transcript (POST)',
             'save_pasted': '/api/save-pasted-transcript (POST)',
@@ -421,33 +578,17 @@ def root():
 
 
 @app.route('/tools/quick-fetch', methods=['GET'])
-def quick_fetch_redirect():
-    """Redirect old bookmarklet URL to /grab so the same paste flow works."""
-    return redirect('/grab?' + request.query_string.decode('utf-8'), code=302)
+def quick_fetch_page():
+    """Bookmarklet popup: auto-fetch on load (pre-eea8f02 quick_fetch.html) when local module present."""
+    if not _LOCAL_YT_DLP_AVAILABLE:
+        return redirect('/grab?' + request.query_string.decode('utf-8'), code=302)
+    return render_template('quick_fetch.html')
 
 
 @app.route('/grab', methods=['GET'])
 def grab_page():
-    """
-    Bookmarklet target: receives url, title, channel as URL parameters from the browser.
-    Renders a page with video info and a textarea to paste the transcript.
-    """
-    url = request.args.get('url', '').strip()
-    title = request.args.get('title', '').strip() or 'Untitled'
-    channel = request.args.get('channel', '').strip() or 'Unknown channel'
-
-    video_id = _extract_video_id(url)
-    if not video_id:
-        return render_template('grab.html', error='Invalid YouTube URL', url=url, title=title, channel=channel, video_id=None)
-
-    return render_template(
-        'grab.html',
-        url=url,
-        title=title,
-        channel=channel,
-        video_id=video_id,
-        error=None
-    )
+    """Manual transcript paste page (no local yt-dlp module, or direct /grab URL)."""
+    return _render_grab_page()
 
 
 @app.route('/api/save-transcript', methods=['POST'])
@@ -500,6 +641,7 @@ def save_transcript():
 def api_fetch_transcript():
     """
     Auto-fetch transcript from YouTube (youtube-transcript-api). On success, same follow-up as save-transcript.
+    When local_yt_dlp_fetcher.py is present, also fetches rich metadata via yt-dlp.
     If the video has no auto transcript, returns paste_required for the quick-fetch bookmarklet flow.
     """
     try:
@@ -511,36 +653,80 @@ def api_fetch_transcript():
         if not video_id:
             return jsonify({'success': False, 'error': 'Invalid YouTube URL'}), 400
 
+        if not _LOCAL_YT_DLP_AVAILABLE:
+            return jsonify({
+                'success': True,
+                'paste_required': True,
+                'video_id': video_id,
+                'title': title,
+                'channel': channel,
+                'url': url if url else f'https://www.youtube.com/watch?v={video_id}',
+                'message': 'Auto-fetch is not enabled on this machine. Paste the transcript manually.',
+            })
+
         from simple_transcript_fetcher import SimpleTranscriptFetcher
 
+        _out(f"\n{'='*60}")
+        _out("📥 GRABBING VIDEO")
+        _out(f"{'='*60}")
+        _out(f"Video ID: {video_id}")
+        _out(f"Title: {title}")
+        _out(f"Channel: {channel}")
+        _out(f"URL: {url}")
+        _out(f"{'='*60}\n")
+
+        logger.info(f"📥 Grabbing video: {video_id} - {title}")
+
         fetcher = SimpleTranscriptFetcher(str(db_path))
+        _out("🔍 Fetching transcript...")
         result = fetcher.fetch_transcript_from_url(url, title, channel)
+        transcript_success = bool(result.get('success'))
+
+        if transcript_success:
+            _out("✅ Transcript fetched successfully")
+        else:
+            _out("⚠️ Transcript fetch failed (video still added to DB)")
+
+        metadata, title, channel = _apply_local_metadata(video_id, url, title, channel)
+
+        try:
+            db.set_watch_date(video_id)
+        except Exception as e:
+            _out(f"⚠️ Failed to set watch_date for {video_id}: {e}")
 
         if result.get('success'):
             msg = result.get('message') or ''
             if msg == 'Transcript already exists' or result.get('cached'):
+                _start_bookmarklet_background(video_id, True, metadata)
+                _log_grab_summary(video_id, title, channel, True, metadata)
                 return jsonify({
                     'success': True,
                     'video_id': result.get('video_id') or video_id,
+                    'title': title,
+                    'channel': channel,
                     'message': msg or 'Transcript already exists',
+                    'has_metadata': metadata is not None,
                 })
             transcript_text = (result.get('transcript') or '').strip()
             if transcript_text:
-                try:
-                    db.set_watch_date(video_id)
-                except Exception as e:
-                    _out(f"Warning: failed to set watch_date for {video_id}: {e}")
-                _finalize_saved_transcript(video_id, len(transcript_text))
+                _start_bookmarklet_background(video_id, True, metadata)
+                _log_grab_summary(video_id, title, channel, True, metadata)
                 return jsonify({
                     'success': True,
                     'video_id': video_id,
+                    'title': title,
+                    'channel': channel,
                     'message': result.get('message') or 'Transcript fetched and saved',
+                    'has_metadata': metadata is not None,
                 })
+            _start_bookmarklet_background(video_id, False, metadata)
+            _log_grab_summary(video_id, title, channel, False, metadata)
             return jsonify({
                 'success': True,
                 'video_id': video_id,
                 'warning': True,
                 'message': 'Video saved but transcript text was empty.',
+                'has_metadata': metadata is not None,
             })
 
         err_raw = (result.get('error') or 'Unknown error')
@@ -560,6 +746,8 @@ def api_fetch_transcript():
                 db.add_video(video_id, title, channel, canonical)
             except Exception as e:
                 logger.warning(f"fetch-transcript add_video: {e}")
+            _start_bookmarklet_background(video_id, False, metadata)
+            _log_grab_summary(video_id, title, channel, False, metadata)
             return jsonify({
                 'success': True,
                 'paste_required': True,
@@ -568,8 +756,10 @@ def api_fetch_transcript():
                 'channel': channel,
                 'url': canonical,
                 'message': err_raw,
+                'has_metadata': metadata is not None,
             })
 
+        _log_grab_summary(video_id, title, channel, False, metadata)
         return jsonify({'success': False, 'error': err_raw}), 400
     except Exception as e:
         logger.error(f"fetch-transcript: {e}", exc_info=True)
@@ -734,7 +924,13 @@ if __name__ == '__main__':
     print("Video Grabber Service")
     print("=" * 60)
     print(f"Port: {port}")
-    print(f"Grab page (bookmarklet): http://localhost:{port}/grab?url=...&title=...&channel=...")
+    print(f"Database: {db_path.resolve()} ({_db_path_source})")
+    if _LOCAL_YT_DLP_AVAILABLE:
+        print("Auto-fetch: enabled (local_yt_dlp_fetcher.py)")
+        print(f"Bookmarklet: http://localhost:{port}/tools/quick-fetch?url=...")
+    else:
+        print("Auto-fetch: disabled (manual paste only)")
+        print(f"Grab page (bookmarklet): http://localhost:{port}/grab?url=...")
     print(f"Health: http://localhost:{port}/health")
     print("=" * 60)
     print("Use the Library and Ask UIs (ports 5002 / 5001) for browsing and search.")

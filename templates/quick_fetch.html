@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -36,41 +36,24 @@
             border-radius: 4px;
             cursor: pointer;
         }
-        .review-btn {
-            background: #1565c0;
-        }
-        .review-btn:hover {
-            background: #0d47a1;
-        }
-        .success-actions {
-            margin-top: 16px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            justify-content: center;
-            align-items: center;
-        }
     </style>
 </head>
 <body>
     <div id="loading">
-        <div class="status-icon loading">🔄</div>
+        <div class="status-icon loading">≡ƒöä</div>
         <h2>Fetching Transcript...</h2>
         <p>Please wait while we grab the text.</p>
     </div>
 
     <div id="success" style="display: none;">
-        <div class="status-icon success">✅</div>
+        <div class="status-icon success">Γ£à</div>
         <h2 id="success-title">Success!</h2>
         <p id="success-msg">Transcript saved to database.</p>
-        <div class="success-actions">
-            <button type="button" class="close-btn review-btn" id="view-review-btn" style="display: none;">View Review</button>
-            <button class="close-btn" onclick="window.close()">Close Window</button>
-        </div>
+        <button class="close-btn" onclick="window.close()">Close Window</button>
     </div>
 
     <div id="error" style="display: none;">
-        <div class="status-icon error">❌</div>
+        <div class="status-icon error">Γ¥î</div>
         <h2>Failed</h2>
         <p id="error-msg">Something went wrong.</p>
         <button class="close-btn" onclick="window.close()">Close Window</button>
@@ -78,7 +61,7 @@
 
     <!-- Paste transcript (IP block workaround) -->
     <div id="paste" style="display: none; max-width: 700px; width: 100%;">
-        <div class="status-icon">📋</div>
+        <div class="status-icon">≡ƒôï</div>
         <h2>Paste transcript</h2>
         <p id="paste-video-title" style="color:#333; margin-bottom: 8px;"></p>
         <p style="color:#666; font-size: 14px; margin-bottom: 12px;">Copy the transcript from the YouTube page, then paste below and click Save.</p>
@@ -90,23 +73,10 @@
     </div>
 
     <script>
-        const REVIEW_BASE = 'http://localhost:5001/review/';
         const urlParams = new URLSearchParams(window.location.search);
         const videoUrl = urlParams.get('url');
         const videoTitle = urlParams.get('title');
         const videoChannel = urlParams.get('channel');
-        let reviewOpenTimer = null;
-
-        function extractVideoIdFromUrl(u) {
-            if (!u) return null;
-            const m = u.match(/[?&]v=([a-zA-Z0-9_-]{11})/) || u.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/) || u.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
-            return m ? m[1] : null;
-        }
-
-        function openReviewInNewTab(videoId) {
-            if (!videoId) return;
-            window.open(REVIEW_BASE + encodeURIComponent(videoId), '_blank', 'noopener,noreferrer');
-        }
 
         if (!videoUrl) {
             showError('No URL provided');
@@ -126,14 +96,11 @@
                     if (data.paste_required) {
                         showPasteForm(data);
                     } else if (data.message === 'Transcript already exists') {
-                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
-                        showSuccess('Already Got It!', 'You already have the transcript for this video.', vid);
+                        showSuccess('Already Got It!', 'You already have the transcript for this video.');
                     } else if (data.warning) {
-                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
-                        showSuccess('Video Saved!', data.message || 'Video saved (no transcript available).', vid);
+                        showSuccess('Video Saved!', data.message || 'Video saved (no transcript available).');
                     } else {
-                        const vid = data.video_id || extractVideoIdFromUrl(videoUrl);
-                        showSuccess('Saved!', data.message || 'Video and transcript saved to database.', vid);
+                        showSuccess('Saved!', data.message || 'Video and transcript saved to database.');
                     }
                 } else {
                     showError(data.error || 'Unknown error');
@@ -147,7 +114,7 @@
         function showPasteForm(data) {
             document.getElementById('loading').style.display = 'none';
             document.getElementById('paste').style.display = 'block';
-            document.getElementById('paste-video-title').textContent = (data.title || 'Video') + ' — ' + (data.channel || '');
+            document.getElementById('paste-video-title').textContent = (data.title || 'Video') + ' ΓÇö ' + (data.channel || '');
             document.getElementById('paste-textarea').value = '';
             document.getElementById('paste-textarea').focus();
             document.getElementById('paste-save-btn').onclick = function() {
@@ -172,8 +139,7 @@
                 .then(r => r.json())
                 .then(d => {
                     if (d.success) {
-                        const vid = d.video_id || data.video_id || extractVideoIdFromUrl(videoUrl);
-                        showSuccess('Saved!', 'Transcript saved and vectorizing in background.', vid);
+                        showSuccess('Saved!', 'Transcript saved and vectorizing in background.');
                     } else {
                         showError(d.error || 'Save failed');
                     }
@@ -184,34 +150,13 @@
             };
         }
 
-        function showSuccess(title, msg, videoId) {
-            if (reviewOpenTimer) {
-                clearTimeout(reviewOpenTimer);
-                reviewOpenTimer = null;
-            }
+        function showSuccess(title, msg) {
             document.getElementById('loading').style.display = 'none';
             document.getElementById('success').style.display = 'block';
             document.getElementById('paste').style.display = 'none';
             if (title) document.getElementById('success-title').textContent = title;
             if (msg) document.getElementById('success-msg').textContent = msg;
-            const reviewBtn = document.getElementById('view-review-btn');
-            const vid = videoId || extractVideoIdFromUrl(videoUrl);
-            if (vid) {
-                reviewBtn.style.display = 'inline-block';
-                reviewBtn.onclick = function () {
-                    openReviewInNewTab(vid);
-                };
-                reviewOpenTimer = setTimeout(function () {
-                    openReviewInNewTab(vid);
-                    reviewOpenTimer = null;
-                }, 3500);
-            } else {
-                reviewBtn.style.display = 'none';
-                reviewBtn.onclick = null;
-                setTimeout(function () {
-                    window.close();
-                }, 2500);
-            }
+            setTimeout(() => window.close(), 2000);
         }
 
         function showError(msg) {
