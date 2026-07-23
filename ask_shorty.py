@@ -231,18 +231,24 @@ def _get_openrouter_client():
     return _openrouter_client
 
 
-def _extract_json_array(text: str) -> Optional[List[str]]:
-    """Best-effort extract a JSON array of strings from model output."""
+def _strip_json_fences(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
-        return None
-    # Strip markdown fences if present
+        return ""
     if "```" in raw:
         import re as _re
 
         m = _re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
         if m:
             raw = m.group(1).strip()
+    return raw
+
+
+def _extract_json_array(text: str) -> Optional[List[str]]:
+    """Best-effort extract a JSON array of strings from model output."""
+    raw = _strip_json_fences(text)
+    if not raw:
+        return None
     # Slice outermost [...]
     s = raw.find("[")
     e = raw.rfind("]")
@@ -261,6 +267,22 @@ def _extract_json_array(text: str) -> Optional[List[str]]:
             if t:
                 out.append(t)
     return out or None
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Best-effort extract a JSON object from model output."""
+    raw = _strip_json_fences(text)
+    if not raw:
+        return None
+    s = raw.find("{")
+    e = raw.rfind("}")
+    if s != -1 and e != -1 and e > s:
+        raw = raw[s : e + 1].strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _call_answer_text(system_prompt: str, user_prompt: str, *, max_tokens: int, temperature: float) -> str:
@@ -691,47 +713,66 @@ Given a natural language question, extract:
 
         user_prompt = f"Question: {question.strip()}"
 
-        client = get_client()
-        tools = [
-            {
-                "name": "parse_metadata",
-                "description": "Parse channel/creator names and optional date range from a question",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "channels": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "date_from": {"type": ["string", "null"]},
-                        "date_to": {"type": ["string", "null"]},
-                    },
-                    "required": ["channels", "date_from", "date_to"],
-                },
-            }
-        ]
-
-        resp = client.messages.create(
-            model=ANSWER_MODEL,
-            max_tokens=256,
-            temperature=0,
-            system=meta_system,
-            messages=[{"role": "user", "content": user_prompt}],
-            tools=tools,
-            tool_choice={"type": "tool", "name": "parse_metadata"},
-        )
-
         data: Dict[str, Any] = {"channels": [], "date_from": None, "date_to": None}
-        for block in resp.content:
-            btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
-            if btype == "tool_use":
-                name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
-                if name != "parse_metadata":
-                    continue
-                tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
-                if isinstance(tool_input, dict):
-                    data = tool_input
-                break
+
+        if _is_openrouter_model(ANSWER_MODEL):
+            # OpenRouter path: ask for a JSON object (no Anthropic tool API).
+            or_system = (
+                meta_system
+                + "\n\nRespond with ONLY a JSON object of the form "
+                '{"channels": ["..."], "date_from": null, "date_to": null}. '
+                "Use null when unknown. No markdown."
+            )
+            raw = _call_answer_text(or_system, user_prompt, max_tokens=256, temperature=0)
+            parsed = _extract_json_object(raw)
+            if parsed:
+                data = parsed
+            else:
+                logger.warning(
+                    "Metadata filter (OpenRouter) returned non-JSON; skipping filter."
+                )
+                return None
+        else:
+            client = get_client()
+            tools = [
+                {
+                    "name": "parse_metadata",
+                    "description": "Parse channel/creator names and optional date range from a question",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "channels": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "date_from": {"type": ["string", "null"]},
+                            "date_to": {"type": ["string", "null"]},
+                        },
+                        "required": ["channels", "date_from", "date_to"],
+                    },
+                }
+            ]
+
+            resp = client.messages.create(
+                model=ANSWER_MODEL,
+                max_tokens=256,
+                temperature=0,
+                system=meta_system,
+                messages=[{"role": "user", "content": user_prompt}],
+                tools=tools,
+                tool_choice={"type": "tool", "name": "parse_metadata"},
+            )
+
+            for block in resp.content:
+                btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+                if btype == "tool_use":
+                    name = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
+                    if name != "parse_metadata":
+                        continue
+                    tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+                    if isinstance(tool_input, dict):
+                        data = tool_input
+                    break
 
         channels = [c.strip() for c in data.get("channels") or [] if isinstance(c, str) and c.strip()]
         date_from = (data.get("date_from") or "") or None
