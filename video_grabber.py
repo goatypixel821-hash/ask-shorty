@@ -46,6 +46,8 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    # Chrome blocks YouTube (public HTTPS) → localhost unless this is set on preflight.
+    response.headers.add('Access-Control-Allow-Private-Network', 'true')
     return response
 
 base_dir = Path(__file__).resolve().parent
