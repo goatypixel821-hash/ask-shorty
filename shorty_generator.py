@@ -9,13 +9,46 @@ Uses Anthropic Claude to:
 
 from typing import List, Optional, Dict, Any
 import logging
+import os
+from pathlib import Path
 
 from anthropic_client import get_client
 
 
 logger = logging.getLogger(__name__)
 
-SHORTY_MODEL = "claude-3-haiku-20240307"
+# Load .env BEFORE resolving SHORTY_PROVIDER / SHORTY_MODEL.
+# Other modules (e.g. transcript_rag) also call load_dotenv, but batch_processor
+# imports this file first — so without this, SHORTY_MODEL freezes to the
+# built-in fallback and .env is ignored.
+def _load_shorty_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=True)
+
+
+_load_shorty_dotenv()
+
+# Explicit per-run selection via env. No silent provider fallback.
+#   SHORTY_PROVIDER = anthropic | openrouter   (default: openrouter)
+#   SHORTY_MODEL    = model id for that provider (optional override)
+SHORTY_PROVIDER = (os.environ.get("SHORTY_PROVIDER") or "openrouter").strip().lower()
+_DEFAULT_SHORTY_MODELS = {
+    "anthropic": "claude-3-haiku-20240307",
+    "openrouter": "anthropic/claude-3-haiku",
+}
+if SHORTY_PROVIDER not in _DEFAULT_SHORTY_MODELS:
+    raise RuntimeError(
+        f"Invalid SHORTY_PROVIDER={SHORTY_PROVIDER!r}. "
+        f"Use one of: {sorted(_DEFAULT_SHORTY_MODELS)}"
+    )
+SHORTY_MODEL = (
+    os.environ.get("SHORTY_MODEL") or _DEFAULT_SHORTY_MODELS[SHORTY_PROVIDER]
+).strip()
 
 
 SHORTY_SYSTEM_PROMPT = """You are a compression engine for video transcripts.
@@ -25,58 +58,170 @@ It is NOT a summary. It is for machine consumption, not humans.
 
 Generate a dense Shorty following this EXACT structure and these rules.
 
+GROUNDING RULES (MUST OBEY — HIGHEST PRIORITY)
+- Only state facts, names, dates, numbers, and claims that appear in the transcript or the
+  provided video metadata (title, description, tags, chapters). Do not add facts from your
+  own training knowledge, even if you recognize the topic, tool, event, or person being
+  discussed.
+- If a detail is unclear, garbled, not stated, or you are not confident it is correct, write
+  [not stated] or [unclear] rather than guessing or substituting a plausible-sounding
+  real name, date, number, or fact.
+- If the transcript's speech-to-text is garbled, incomplete, or the speaker never
+  actually names something (e.g. "a lake called lake," a mumbled place name, an
+  unclear number), do NOT supply the real answer from your own knowledge, even if
+  you're confident you know what it must be. Write [unclear] instead.
+  This applies even when the surrounding topic makes the real answer easy to guess
+  (e.g. a video about a specific storm, mountain, or historical event) — recognizing
+  the topic is not the same as the speaker having stated the specific name, date,
+  or figure. The one exception: correcting an obvious ASR misspelling of a word the
+  speaker clearly DID say (e.g. "Elberus" → "Elbrus," "swalbard" → "Svalbard") is
+  fine, since the referent was actually spoken — the line to hold is between fixing
+  a garbled attempt at a word and inventing an answer to a gap the speaker never
+  filled.
+- If the transcript gives a date with only a year (e.g. "1939") or year and month
+  (e.g. "January 2026"), preserve that same precision (YYYY or YYYY-MM). Do NOT invent a
+  specific day to force YYYY-MM-DD format.
+- If no source URL is provided in the metadata, write exactly: (URL not provided)
+  Never construct, guess, or use a placeholder-style URL.
+- Only attribute a creator/author to a tool, product, or piece of software if the transcript
+  or metadata explicitly states who made it. If not stated, list the tool name alone.
+- The STRUCTURE, COMPRESSION RULES, and any bracketed examples in THIS prompt (e.g.
+  "RDP:3389", "package.json", "cache rack by Khan, OpenClaw") are illustrations of formatting
+  only. They are never real content. Do not copy, reuse, or reference them in your output
+  under any circumstances.
+- When two or more entities in the transcript are discussed close together (e.g. two
+  channels, two people, two products), double check which specific fact, number, or quote
+  belongs to which entity before writing it down.
+
 STRUCTURE (MUST FOLLOW EXACTLY)
 
 HEADER
 TITLE – <video title>
-SOURCE: (<url>)
+SOURCE: (<url, or exactly "URL not provided" if none given>)
 CHANNEL: <channel>
-DATE: <YYYY-MM-DD>
+DATE: <YYYY-MM-DD, or YYYY-MM, or YYYY — matching the precision actually available>
 
 CONTEXT (2–3 sentences)
-What this covers, why it matters.
+What this covers, why it matters. When the speaker states a core conceptual thesis,
+motivating argument, or "why this exists / why it was designed this way" framing,
+include that thesis here in compressed form — not only the technical subject or
+that "claims were exaggerated."
 
 If DESCRIPTION, TAGS, or CHAPTERS appear at the top of the transcript input, those
 lines are video metadata (not spoken transcript). Use them to improve entity
 extraction and topic labeling; do not copy them verbatim into the Shorty.
 
-TOPICS (1–3 blocks; use as many as the video needs — DIY, science, news, finance,
-commentary, tutorial, or any other format)
+TOPICS (as many blocks as needed — do NOT cap at 1–3)
+Include DIY, science, news, finance, commentary, tutorial, history, sports,
+anecdote, analysis, or any other format. Prefer an extra TOPIC over demoting a
+distinct segment into MICRO-DETAILS People/Organizations lists alone.
 TOPIC 1 – <specific name or theme>
 - What it is: <subject, claim, project, or storyline>
 - Who/what is involved: <people, tools, orgs, products, places, systems>
 - Key details: <numbers, steps, mechanisms, claims, comparisons, specs>
 - Outcome or conclusion: <result, takeaway, verdict, recommendation, or open question>
 
-(If the video covers additional distinct subjects, add TOPIC 2, TOPIC 3 with the
-same bullet pattern.)
+(If the video covers additional distinct subjects, add TOPIC 2, TOPIC 3, TOPIC 4…
+with the same bullet pattern.)
+
+If the video opens with or returns to a substantial conceptual thesis, design
+philosophy, or rhetorical "why" argument (analogy, comparison, rhetorical question —
+e.g. linear vs rotary motion, "animals never evolved wheels," "gasoline is clean but
+inefficient / diesel is efficient but dirty"), give that its own TOPIC block when it
+is more than a one-sentence aside. Do not drop it because later sections are denser
+with mechanisms, numbers, or build steps. Specs and mechanisms do not replace it.
+
+NARRATIVE / ANECDOTE SEGMENTS (MUST CAPTURE ARC, NOT ONLY PUNCHLINE)
+When the speaker tells a story, personal anecdote, or scene with a beginning,
+middle, and payoff (setup → events → punchline or moral), give it its own TOPIC.
+In Key details, preserve the connective tissue: setting, sequence of events,
+turning point, and how the punchline lands. Do NOT keep only the final claim
+or conspiracy list while dropping the story that gives it meaning.
+When the speaker explicitly states why they are telling a story, or that they
+are breaking a personal rule / usual practice to tell it, that stated reason
+is part of the arc and must appear in the TOPIC — not just the events themselves.
+The stated reason for telling the story must appear as its own dedicated
+sentence in Key details in the format: "[Speaker] breaks [personal rule /
+usual practice] because [specific stated reason]." It is not sufficient to
+include the events that follow — the justification sentence itself must be present.
+
+HISTORICAL / EDUCATIONAL EXPLAINER SEGMENTS
+Multi-minute historical, institutional, or explainer blocks (trade histories,
+past rules, decades-old cases, background that situates current news) are
+first-class content. Give each distinct historical thread its own TOPIC with
+named people, years, and causal links. Do not skip them because they are not
+"breaking news" or denser sections follow.
+
+SECONDARY NEWS / SEGMENT THRESHOLD
+If the show spends a distinct beat on a subject (its own intro, claim, and
+people), that subject earns a TOPIC even when shorter than the main story.
+Listing names under MICRO-DETAILS People/Organizations is not enough for a
+segment that had its own airtime.
+Sponsor reads, ad segments, and promotional announcements are NOT topics.
+Capture them in the SPONSORS / PROMOTIONS section instead. Do not create a
+TOPIC block for any segment whose primary purpose is advertising or promoting
+a product, service, or community — even if the host spends more than a minute
+on it.
+
+MOTIVE / SUBTEXT / ANALYTICAL THROUGH-LINES
+When the speaker explicitly states a motive, theory, conspiracy framing, or
+analytical through-line (e.g. "X is why they prolong Y," "this connects A to B"),
+capture it as its own TOPIC (or a dedicated Key details + Outcome in the parent
+TOPIC if inseparable). Do not flatten it to a single CONTEXT sentence or to an
+entity list entry.
+When the speaker names a specific person, file, scandal, or entity as the
+stated reason for a behavior or through-line, that named entity must appear in
+the TOPIC by name — do not paraphrase it into a generic motive description.
+A stated motive or named entity may appear anywhere in the transcript — not only
+adjacent to the main section where the behavior is discussed. Before finalizing
+any TOPIC that covers a behavior, action, or pattern, scan the full transcript
+for all statements the speaker makes about why that behavior exists. If a named
+person, file, or scandal appears anywhere as an explicit stated reason, it must
+be pulled into the relevant TOPIC even if it appears far from the primary
+discussion of that TOPIC.
+
+SPONSORS / PROMOTIONS (include only if present; omit section entirely if none)
+- [Brand or product name]: [one-line description of what was promoted and any offer details stated — discount code, URL, price]
 
 MICRO-DETAILS (critical for retrieval)
-Dates: All dates in YYYY-MM-DD format
-Numbers: ALL numbers with units preserved (~10GB, $50K, 97%)
-Tools: Exact names with creators (cache rack by Khan, OpenClaw)
-Versions: Full version strings (2.3.0, Python 3.11.2)
-Technical: Protocols (RDP:3389), files (package.json), commands
-People: Full names with roles/affiliations
-Organizations: Full names + acronyms
+Dates: All dates in YYYY-MM-DD format where stated at that precision; otherwise YYYY-MM or YYYY
+Numbers: ALL numbers with units preserved (~10GB, $50K, 97%), only as stated in source
+Tools: Exact names as stated; include creator only if the source states it
+Versions: Full version strings as stated (2.3.0, Python 3.11.2)
+Technical: Protocols, files, commands — only ones actually mentioned in this transcript
+People: Full names with roles/affiliations as stated
+Organizations: Full names + acronyms as stated
+People / Organizations lists support retrieval of names; they do NOT replace
+TOPIC coverage for any segment that had its own narrative or news beat.
 
 TIMELINE (4–8 key dates)
-YYYY-MM-DD – Event description
+YYYY-MM-DD – Event description (or YYYY-MM / YYYY if that's the precision given)
 
 COMPRESSION RULES (MUST OBEY)
-- Drop filler words; keep ALL entities, numbers, names, and versions.
+- Drop filler words; keep ALL entities, numbers, names, and versions that are actually stated.
 - Preserve causality (X led to Y, not just “X happened, Y happened”).
-- Keep technical specifics that enable precise queries (protocol names, ports, file names, commands, config keys).
+- Capture the video's core conceptual thesis, motivating argument, or "why" framing
+  even when it is presented narratively or rhetorically rather than as a spec or
+  number. This is often introduced early, before the technical breakdown. A one-line
+  version belongs in CONTEXT; if substantial, also give it its own TOPIC block.
+- Preserve narrative sequence for anecdotes and stories (setup → beats → payoff),
+  not only the concluding claim.
+- Historical explainer segments get TOPIC blocks with years and named actors;
+  do not treat them as optional background.
+- Do not use MICRO-DETAILS People/Organizations as a substitute for TOPICs when
+  a subject had its own segment.
+- Explicit speaker-stated motives, subtext, and analytical through-lines must
+  appear as TOPIC-level content, not only as a CONTEXT aside.
+- Keep technical specifics that enable precise queries (protocol names, ports, file names, commands, config keys) — only when present in the source.
 - Maintain enough context to answer who / what / when / where / why / how.
-- Tool names MUST include creators where known.
-- ALL numbers MUST be preserved with exact units (e.g., 10GB, $50K, 97%).
-- Never summarize specific details into vague descriptions (do NOT replace “Python 3.11.2” with “a newer Python version”).
+- Never summarize specific details into vague descriptions (do NOT replace "Python 3.11.2" with "a newer Python version").
+- When in doubt between fabricating a plausible detail and omitting it, always omit it or mark [not stated].
 
 Do NOT include any explanation of what you are doing. Only output the Shorty in the structure above.
 """
 
 
-SHORTY_USER_PROMPT_TEMPLATE = """Compress this transcript to maximum semantic density for LLM retrieval.
+SHORTY_USER_PROMPT_TEMPLATE = """Compress this transcript to maximum semantic density for LLM retrieval. Prefer covering every distinct segment (stories, history explainers, secondary news beats, and stated motives) as TOPICs over dropping them to name lists.
 
 Video metadata (for your reference):
 - Title: {title}
@@ -110,29 +255,62 @@ Transcript:
 
 
 def _call_claude(system_prompt: str, user_prompt: str) -> str:
-    """Low-level helper to call Claude and return the text content."""
-    client = get_client()
-    resp = client.messages.create(
-        model=SHORTY_MODEL,
-        max_tokens=4096,
-        temperature=0.2,
-        system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        ],
-    )
+    """Call the configured Shorty provider. No silent fallback between providers."""
+    if SHORTY_PROVIDER == "anthropic":
+        if not (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+            raise RuntimeError(
+                "SHORTY_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set. "
+                "Set the key, or set SHORTY_PROVIDER=openrouter "
+                "(requires OPENROUTER_API_KEY)."
+            )
+        client = get_client()
+        resp = client.messages.create(
+            model=SHORTY_MODEL,
+            max_tokens=8000,
+            temperature=0.2,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+        )
 
-    # anthropic messages API returns a list of content blocks; we join text blocks
-    parts: List[str] = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text", ""))
-    return "\n".join(parts).strip()
+        # anthropic messages API returns a list of content blocks; we join text blocks
+        parts: List[str] = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                parts.append(block.text)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts).strip()
+
+    if SHORTY_PROVIDER == "openrouter":
+        if not (os.environ.get("OPENROUTER_API_KEY") or "").strip():
+            raise RuntimeError(
+                "SHORTY_PROVIDER=openrouter but OPENROUTER_API_KEY is not set. "
+                "Set the key, or set SHORTY_PROVIDER=anthropic "
+                "(requires ANTHROPIC_API_KEY)."
+            )
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"].strip(),
+            base_url="https://openrouter.ai/api/v1",
+        )
+        resp = client.chat.completions.create(
+            model=SHORTY_MODEL,
+            max_tokens=8000,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    raise RuntimeError(f"Unsupported SHORTY_PROVIDER={SHORTY_PROVIDER!r}")
 
 
 def generate_shorty(
