@@ -405,6 +405,8 @@ def _run_job_v2(job_id: int, question: str, video_ids):
                 "used_context": result.get("used_context", []),
                 "sources":      result.get("sources", []),
                 "debug_events": result.get("debug_events", []),
+                "grounding_audit": result.get("grounding_audit", []),
+                "verification_excerpts": result.get("verification_excerpts", []),
             }
         )
         job_file = _jobs_dir / f"{job_id}.json"
@@ -1226,6 +1228,8 @@ def api_ask_by_ref(ref_id: str):
             "used_context": payload.get("used_context", []),
             "sources": payload.get("sources", []),
             "debug_events": payload.get("debug_events", []),
+            "grounding_audit": payload.get("grounding_audit", []),
+            "verification_excerpts": payload.get("verification_excerpts", []),
         }
     )
 
@@ -1315,6 +1319,8 @@ def api_ask_result(job_id: int):
             "used_context": payload.get("used_context", []),
             "sources": payload.get("sources", []),
             "ref_id": ref_id,
+            "grounding_audit": payload.get("grounding_audit", []),
+            "verification_excerpts": payload.get("verification_excerpts", []),
         }
         print(f"[ask_jobs] job_id={job_id} returning completed (from file)")
         return jsonify(resp)
@@ -1339,6 +1345,8 @@ def api_ask_result(job_id: int):
                 "used_context": [],
                 "sources": [],
                 "debug_events": [],
+                "grounding_audit": [],
+                "verification_excerpts": [],
             }
         resp = {
             "success": True,
@@ -1347,6 +1355,8 @@ def api_ask_result(job_id: int):
             "used_context": payload.get("used_context", []),
             "sources": payload.get("sources", []),
             "ref_id": ref_id,
+            "grounding_audit": payload.get("grounding_audit", []),
+            "verification_excerpts": payload.get("verification_excerpts", []),
         }
         print(f"[ask_jobs] job_id={job_id} returning completed (from DB)")
         return jsonify(resp)

@@ -1331,8 +1331,9 @@ def main():
         "--provider",
         type=str,
         choices=["anthropic", "openai-compatible", "openrouter"],
-        default="anthropic",
-        help="Which LLM provider to use for generation. Default: anthropic. "
+        default="openrouter",
+        help="Which LLM provider to use for generation. Default: openrouter "
+             "(matches the SHORTY_PROVIDER default in shorty_generator.py). "
              "openrouter uses OPENROUTER_API_KEY and https://openrouter.ai/api/v1 (OpenAI SDK).",
     )
     parser.add_argument(
@@ -1426,6 +1427,26 @@ def main():
 
     # Select provider-specific generation functions
     provider = args.provider
+
+    # --provider anthropic routes through generate_shorty(), which follows
+    # SHORTY_PROVIDER / SHORTY_MODEL resolved at import time in shorty_generator.
+    # Those can silently disagree with this flag, so refuse to run instead.
+    if provider == "anthropic":
+        from shorty_generator import SHORTY_MODEL as _sg_model
+        from shorty_generator import SHORTY_PROVIDER as _sg_provider
+
+        if _sg_provider != "anthropic":
+            _log(
+                f"ERROR: --provider anthropic but shorty_generator.SHORTY_PROVIDER="
+                f"{_sg_provider!r} (SHORTY_MODEL={_sg_model!r}). Refusing to run — "
+                f"this would silently use {_sg_provider} instead of the Anthropic API.\n"
+                f"  Fix one of:\n"
+                f"    - set SHORTY_PROVIDER=anthropic (and ANTHROPIC_API_KEY) in .env, or\n"
+                f"    - pass --provider openrouter (uses --model), or\n"
+                f"    - pass --provider openai-compatible with --base-url / --model."
+            )
+            return
+
     triple_raw_sink: Optional[List[str]] = None
     if args.debug_zero_triples and provider not in ("openai-compatible", "openrouter"):
         _log(

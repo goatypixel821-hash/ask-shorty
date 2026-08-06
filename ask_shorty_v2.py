@@ -55,6 +55,29 @@ CE_SKIP_BM25_MIN_TOP_SCORE = float(os.environ.get("V2_CE_SKIP_BM25_MIN_TOP", "3.
 
 LLM_VIDEOS = 10
 
+# Opt-in raw-transcript verification excerpts after answer (Part 1-B). Default off.
+ENABLE_V2_VERIFY: bool = os.getenv("ASK_SHORTY_V2_VERIFY", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+V2_VERIFY_CHUNKS_PER_VIDEO = 2
+
+# Prompt-level grounding (Part 2) — adapted from Chat Logger AGENT_GROUNDING_SYNTHESIS_RULES.
+V2_GROUNDING_SYNTHESIS_RULES = """
+GROUNDING (mandatory):
+- Only state specific facts (numbers, names, dates, technical specs, quotes, causal claims)
+  if the exact claim appears in the Context blocks and/or RETRIEVAL SUMMARY above.
+- Video titles and channel names alone are not evidence for factual claims — they are
+  identifiers. Prefer SHORTY and SEGMENTS text for facts.
+- Never invent plausible details from general knowledge to fill gaps. If the context does
+  not contain the detail, say so clearly.
+- If context blocks are thin or contradictory, report the gap honestly instead of filling it.
+- Retrieval summary counts and date spans may be restated as given; do not invent additional
+  library statistics.
+"""
+
 _V2_QUERY_EXPAND_SYSTEM = (
     "You return only a JSON array of strings. No markdown fences, no explanation."
 )
@@ -202,6 +225,168 @@ def _score_topic_title_shorty(
         elif in_s:
             shorty_only += 1
     return (title_hits, shorty_only)
+
+
+def _chunk_transcript_text(
+    text: str, max_chars: int = 800, overlap: int = 200
+) -> List[str]:
+    """Same character-window chunking as classic rag._chunk_transcript / agent path."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    chunks: List[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + max_chars, length)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end == length:
+            break
+        start = max(0, end - overlap)
+    return chunks
+
+
+def _score_chunk_against_hint(chunk: str, hint: str) -> int:
+    """Classic-style overlap: token hits in chunk, plus whole-hint substring count."""
+    low = (chunk or "").lower()
+    h = (hint or "").strip().lower()
+    if not low or not h:
+        return 0
+    score = low.count(h) * 10 if len(h) >= 4 else 0
+    tokens = [t for t in re.findall(r"\w+", h) if len(t) >= 3]
+    score += sum(1 for t in tokens if t in low)
+    return score
+
+
+def _best_chunks_for_hint(
+    text: str, hint: str, top_n: int = V2_VERIFY_CHUNKS_PER_VIDEO
+) -> List[Dict[str, Any]]:
+    chunks = _chunk_transcript_text(text)
+    if not chunks:
+        return []
+    ranked = sorted(
+        ((_score_chunk_against_hint(c, hint), i, c) for i, c in enumerate(chunks)),
+        key=lambda x: (-x[0], x[1]),
+    )
+    out: List[Dict[str, Any]] = []
+    for score, idx, c in ranked[: max(1, top_n)]:
+        out.append({"chunk_index": idx, "score": score, "text": c})
+    return out
+
+
+def _collect_verification_excerpts(
+    db_path: str,
+    sources: Sequence[Dict[str, Any]],
+    hint: str,
+    *,
+    chunks_per_video: int = V2_VERIFY_CHUNKS_PER_VIDEO,
+) -> List[Dict[str, Any]]:
+    """
+    Part 1-B: after answer, pull 1–2 best raw transcript chunks per cited source.
+    Non-rewriting — attach only. Reuses classic chunking + hint matching.
+    """
+    excerpts: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        for src in sources:
+            vid = str((src or {}).get("video_id") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            cur.execute(
+                """
+                SELECT text FROM transcripts
+                WHERE video_id = ? AND text IS NOT NULL AND trim(text) != ''
+                ORDER BY id DESC LIMIT 1
+                """,
+                (vid,),
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                excerpts.append(
+                    {
+                        "video_id": vid,
+                        "title": (src or {}).get("title") or vid,
+                        "chunks": [],
+                        "note": "no_transcript_text",
+                    }
+                )
+                continue
+            best = _best_chunks_for_hint(str(row[0]), hint, top_n=chunks_per_video)
+            excerpts.append(
+                {
+                    "video_id": vid,
+                    "title": (src or {}).get("title") or vid,
+                    "channel": (src or {}).get("channel") or "",
+                    "chunks": best,
+                }
+            )
+    return excerpts
+
+
+def _strip_thousands_separators(text: str) -> str:
+    """Join digit groups split by commas/spaces/etc. so 34,899 == 34899 for audits."""
+    return re.sub(r"(?<=\d)[,_\u00a0\u202f\s](?=\d)", "", text or "")
+
+
+def _normalize_phrase_for_match(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — titles with trailing commas still match."""
+    t = (text or "").lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _audit_answer_against_blob(
+    answer: str,
+    blob: str,
+    flags: List[str],
+    *,
+    empty_blob_flag: str,
+    numbers_flag_prefix: str,
+    quoted_flag_prefix: str,
+) -> None:
+    """Chat Logger–style non-blocking audit: numbers + quoted phrases vs evidence blob."""
+    blob_raw = blob or ""
+    if not blob_raw.strip():
+        flags.append(empty_blob_flag)
+        return
+    blob_lower = blob_raw.lower()
+    # Digits: normalize thousands-separators on both sides before extracting.
+    ans_digit_src = _strip_thousands_separators(answer or "")
+    blob_digit_src = _strip_thousands_separators(blob_raw)
+    nums = set(re.findall(r"\b\d+\b", ans_digit_src))
+    blob_nums = set(re.findall(r"\b\d+\b", blob_digit_src))
+    novel_nums = sorted(n for n in nums if n not in blob_nums and len(n) >= 2)
+    if novel_nums:
+        flags.append(numbers_flag_prefix + ",".join(novel_nums[:12]))
+    blob_phrase_norm = _normalize_phrase_for_match(blob_raw)
+    for phrase in re.findall(r'"([^"]{8,80})"', answer or ""):
+        pl = phrase.lower()
+        if pl in blob_lower:
+            continue
+        if _normalize_phrase_for_match(phrase) in blob_phrase_norm:
+            continue
+        flags.append(quoted_flag_prefix + phrase[:60].replace("\n", " "))
+        break
+
+
+def _append_v2_grounding_audit_flags(
+    answer: str, context_blob: str, flags: List[str]
+) -> None:
+    _audit_answer_against_blob(
+        answer,
+        context_blob,
+        flags,
+        empty_blob_flag="grounding_audit: empty_context_blob",
+        numbers_flag_prefix="grounding_audit: answer_numbers_not_in_context=",
+        quoted_flag_prefix="grounding_audit: quoted_phrase_not_in_context=",
+    )
 
 
 def _select_llm_context_video_ids(
@@ -1318,6 +1503,8 @@ class AskShortyV2:
                 "used_context": [],
                 "sources": [],
                 "debug_events": _debug_events,
+                "grounding_audit": [],
+                "verification_excerpts": [],
             }
             _tim["select_llm_context_ms"] = 0.0
             _tim["context_blocks_sql_ms"] = 0.0
@@ -1519,6 +1706,7 @@ Videos included in context below (title | channel | watch date):
             "so additional relevant videos may exist but are not fully processed for this pipeline. "
             "Then answer the question. Cite video title and channel. "
             "Include watch date as (watched: YYYY-MM-DD) when present. Use timestamp ranges when given."
+            + V2_GROUNDING_SYNTHESIS_RULES
         )
         user_p = (
             f"Question:\n{q}\n\n{stats_block}\n\nContext:\n" + "\n---\n".join(blocks)
@@ -1532,7 +1720,14 @@ Videos included in context below (title | channel | watch date):
         )
 
         if should_cancel and should_cancel():
-            return {"answer": "", "used_context": [], "sources": [], "debug_events": _debug_events}
+            return {
+                "answer": "",
+                "used_context": [],
+                "sources": [],
+                "debug_events": _debug_events,
+                "grounding_audit": [],
+                "verification_excerpts": [],
+            }
 
         _emit("step", label="V2 — calling answer model (OpenRouter or Anthropic per ANSWER_MODEL)")
 
@@ -1550,6 +1745,52 @@ Videos included in context below (title | channel | watch date):
             answer_text = str(answer_text) if answer_text is not None else ""
 
         _emit("step", label="V2 — received model answer")
+
+        # Part 2: non-blocking grounding audit (log/flag only — never rewrite).
+        grounding_audit: List[str] = []
+        _append_v2_grounding_audit_flags(answer_text, user_p, grounding_audit)
+        dbg["grounding_audit"] = list(grounding_audit)
+        if grounding_audit:
+            _emit(
+                "grounding_audit",
+                label="V2 — grounding audit flags: " + "; ".join(grounding_audit),
+                flags=list(grounding_audit),
+            )
+        else:
+            _emit("grounding_audit", label="V2 — grounding audit clean", flags=[])
+
+        # Part 1-B: optional raw transcript excerpts (ASK_SHORTY_V2_VERIFY=1).
+        verification_excerpts: List[Dict[str, Any]] = []
+        if ENABLE_V2_VERIFY and sources:
+            t_ver = time.perf_counter()
+            hint = f"{q}\n{answer_text}"
+            try:
+                verification_excerpts = _collect_verification_excerpts(
+                    self.db_path, sources, hint
+                )
+            except Exception as ver_exc:
+                _emit(
+                    "error",
+                    label="V2 — verification excerpts failed",
+                    message=str(ver_exc),
+                )
+                verification_excerpts = []
+            _tim["verification_excerpts_ms"] = round(
+                (time.perf_counter() - t_ver) * 1000.0, 2
+            )
+            dbg["timing_ms"] = _tim
+            dbg["verification_excerpts_count"] = sum(
+                len(e.get("chunks") or []) for e in verification_excerpts
+            )
+            _emit(
+                "verification",
+                label=(
+                    f"V2 — verification excerpts for {len(verification_excerpts)} "
+                    f"source video(s) (ASK_SHORTY_V2_VERIFY on)"
+                ),
+                count=dbg["verification_excerpts_count"],
+            )
+
         try:
             _emit(
                 "step",
@@ -1595,6 +1836,8 @@ Videos included in context below (title | channel | watch date):
             "used_context": blocks,
             "sources": sources,
             "debug_events": _debug_events,
+            "grounding_audit": grounding_audit,
+            "verification_excerpts": verification_excerpts,
         }
 
 
