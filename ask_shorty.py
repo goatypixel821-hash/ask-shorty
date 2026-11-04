@@ -328,7 +328,9 @@ def _call_claude_json_array(system_prompt: str, user_prompt: str) -> List[str]:
         if arr:
             return arr
         logger.warning("Query rewriting returned non-JSON; falling back to original question.")
-        return [user_prompt.strip()]
+        # Was [user_prompt]: the whole rewrite *template*, which then got searched
+        # as a query variant. Callers already prepend the original question.
+        return []
 
     client = get_client()
 
@@ -380,7 +382,9 @@ def _call_claude_json_array(system_prompt: str, user_prompt: str) -> List[str]:
 
     if not rewrites:
         logger.warning("Query rewriting tool returned no queries; falling back to original.")
-        return [user_prompt.strip()]
+        # Was [user_prompt]: the whole rewrite *template*, which then got searched
+        # as a query variant. Callers already prepend the original question.
+        return []
     return rewrites
 
 
@@ -661,7 +665,13 @@ class AskShorty:
 
     def _rewrite_query(self, question: str) -> List[str]:
         user_prompt = QUERY_REWRITE_USER_TEMPLATE.format(question=question.strip())
-        rewrites = _call_claude_json_array(QUERY_REWRITE_SYSTEM, user_prompt)
+        try:
+            rewrites = _call_claude_json_array(QUERY_REWRITE_SYSTEM, user_prompt)
+        except Exception as exc:
+            # Rewrites are an optional recall boost; an LLM timeout/error here used to
+            # abort the whole answer. Fall back to the original question (as V2 does).
+            logger.warning("Query rewrite failed; using original question only: %r", exc)
+            rewrites = []
         # Always include original question as first element
         base = [question.strip()]
         for q in rewrites:
