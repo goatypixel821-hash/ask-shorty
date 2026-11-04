@@ -57,3 +57,7 @@ desktop.ini
 
 # ── in-repo experiment sandbox (never push to ask-shorty) ───────────────────
 shorty-experiment/
+
+# ── local dev ────────────────────────────────────────────────────────────────
+.venv/
+.pytest_cache/

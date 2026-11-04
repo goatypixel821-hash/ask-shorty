@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8
+# Playwright is only needed for tests/ui/run_ui_check.py (pip install playwright; playwright install chromium)
