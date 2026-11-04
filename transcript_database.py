@@ -330,9 +330,11 @@ class TranscriptDatabase:
                 """
             )
 
-            conn.execute("PRAGMA journal_mode=WAL")
-
+            # Commit the DDL / INSERT OR IGNORE rows first: SQLite refuses to change
+            # journal mode inside a transaction ("cannot change into wal mode from
+            # within a transaction"), which crashed every open of a non-WAL DB.
             conn.commit()
+            conn.execute("PRAGMA journal_mode=WAL")
             print(
                 f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"[OK] Transcript database ready: {self.db_path}"
