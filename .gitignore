@@ -37,6 +37,8 @@ build/
 # ── env / secrets ─────────────────────────────────────────────────────────────
 .env
 *.env
+# machine-specific config (copy ask_shorty.local.toml.example)
+ask_shorty.local.toml
 secrets.json
 anthropic_key.txt
 

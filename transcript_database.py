@@ -14,11 +14,20 @@ from typing import Optional, List, Dict, Any
 
 
 class TranscriptDatabase:
-    def __init__(self, db_path: str = None):
-        """Initialize transcript database"""
+    def __init__(self, db_path: str = None, create: Optional[bool] = None):
+        """
+        Open (and migrate) a transcripts DB.
+
+        ``db_path`` defaults to ``config.db_path()``. A missing file raises
+        ``config.DatabaseNotFoundError`` unless ``create=True`` (or
+        ASK_SHORTY_CREATE_DB=1 / ``python config.py init-db``): a typo'd path used to
+        silently produce an empty DB.
+        """
+        import config
+
         if db_path is None:
-            db_path = os.environ.get("ASK_SHORTY_DB_PATH") or "data/transcripts.db"
-        self.db_path = db_path
+            db_path = str(config.db_path())
+        self.db_path = config.require_db(db_path, create=create)
         self.ensure_db_exists()
 
     def ensure_db_exists(self):

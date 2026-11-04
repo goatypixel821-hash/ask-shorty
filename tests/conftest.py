@@ -25,6 +25,18 @@ if str(ROOT) not in sys.path:
 # Make sure nothing below can pick up a real key from the developer's shell.
 for _k in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
     os.environ.pop(_k, None)
+# Keep the developer's .env / ask_shorty.local.toml / path settings out of the tests:
+# each test that needs a DB points ASK_SHORTY_DB_PATH (etc.) at its own temp copy.
+import tempfile as _tempfile
+
+for _k in ("ASK_SHORTY_DB_PATH", "ASK_SHORTY_FULL_DB_PATH", "ASK_SHORTY_CHROMA_PATH",
+           "ASK_SHORTY_FULL_CHROMA_PATH", "ASK_SHORTY_DATA_DIR", "ASK_SHORTY_CREATE_DB",
+           "SHORTY_PROVIDER", "SHORTY_MODEL", "ANSWER_MODEL", "OPENROUTER_MODEL", "ASK_SHORTY_HOST"):
+    os.environ.pop(_k, None)
+os.environ["ASK_SHORTY_NO_DOTENV"] = "1"
+_EMPTY_CONFIG = Path(_tempfile.mkdtemp(prefix="ask-shorty-cfg-")) / "empty.toml"
+_EMPTY_CONFIG.write_text("", encoding="utf-8")
+os.environ["ASK_SHORTY_CONFIG"] = str(_EMPTY_CONFIG)
 # Feature flags the tests rely on being off unless a test turns them on.
 for _k in ("ASK_SHORTY_RERANK", "ASK_SHORTY_GRAPH", "ASK_SHORTY_HSC", "ASK_SHORTY_AGENT", "ASK_SHORTY_V2_VERIFY"):
     os.environ.pop(_k, None)
@@ -135,7 +147,7 @@ def build_corpus(base: Path, embedder=None) -> Dict[str, Any]:
     data.mkdir(parents=True, exist_ok=True)
     db_path = str(data / "transcripts.db")
     chroma_dir = str(data / "transcript_chroma")
-    db = TranscriptDatabase(db_path)
+    db = TranscriptDatabase(db_path, create=True)
 
     for v in VIDEOS:
         vid = v["video_id"]

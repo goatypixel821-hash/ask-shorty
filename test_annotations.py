@@ -22,7 +22,7 @@ class AnnotationApiTests(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db_path = Path(self._tmpdir.name) / "test_annotations.db"
-        self.db = TranscriptDatabase(str(self.db_path))
+        self.db = TranscriptDatabase(str(self.db_path), create=True)
         vg.db = self.db
         self.client = vg.app.test_client()
 
