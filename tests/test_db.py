@@ -18,7 +18,7 @@ def _journal_mode(path: str) -> str:
 def test_reopen_fresh_db_does_not_crash(tmp_path):
     """Regression: 2nd open of a fresh DB raised 'cannot change into wal mode from within a transaction'."""
     p = str(tmp_path / "data" / "t.db")
-    TranscriptDatabase(p)
+    TranscriptDatabase(p, create=True)
     TranscriptDatabase(p)  # used to raise sqlite3.OperationalError
     assert _journal_mode(p) == "wal"
 
@@ -59,7 +59,7 @@ def test_latest_transcript_wins_within_same_second(tmp_path):
     1-second resolution, so a re-save in the same second could attach the Shorty to the
     old row and read back the old text.
     """
-    db = TranscriptDatabase(str(tmp_path / "data" / "t.db"))
+    db = TranscriptDatabase(str(tmp_path / "data" / "t.db"), create=True)
     db.add_video("SAMESECOND1", "t", "c", "u")
     with sqlite3.connect(db.db_path) as c:
         for text in ("old text", "new text"):
@@ -85,7 +85,7 @@ def test_synthetic_question_embedding_ids_match_positions(corpus):
 def test_bare_filename_db_path(tmp_path, monkeypatch):
     """os.makedirs('') raised FileNotFoundError for a db_path with no directory part."""
     monkeypatch.chdir(tmp_path)
-    TranscriptDatabase("plain.db")
+    TranscriptDatabase("plain.db", create=True)
     assert (tmp_path / "plain.db").exists()
 
 

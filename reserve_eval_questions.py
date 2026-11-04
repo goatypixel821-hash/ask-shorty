@@ -17,7 +17,9 @@ import sqlite3
 import re
 from pathlib import Path
 
-DB = r'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db'
+import config
+
+DB = config.require_db(config.full_db_path())
 EVAL_RESULTS_DIR = Path(__file__).parent / 'eval_results'
 OUT = Path(__file__).parent / 'data' / 'reserved_eval_ids.json'
 

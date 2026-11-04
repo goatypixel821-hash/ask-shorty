@@ -22,13 +22,9 @@ logger = logging.getLogger(__name__)
 # imports this file first — so without this, SHORTY_MODEL freezes to the
 # built-in fallback and .env is ignored.
 def _load_shorty_dotenv() -> None:
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=True)
+    import config
+
+    config.load_project_dotenv(override=True)
 
 
 _load_shorty_dotenv()
@@ -36,19 +32,13 @@ _load_shorty_dotenv()
 # Explicit per-run selection via env. No silent provider fallback.
 #   SHORTY_PROVIDER = anthropic | openrouter   (default: openrouter)
 #   SHORTY_MODEL    = model id for that provider (optional override)
-SHORTY_PROVIDER = (os.environ.get("SHORTY_PROVIDER") or "openrouter").strip().lower()
-_DEFAULT_SHORTY_MODELS = {
-    "anthropic": "claude-3-haiku-20240307",
-    "openrouter": "anthropic/claude-3-haiku",
-}
-if SHORTY_PROVIDER not in _DEFAULT_SHORTY_MODELS:
-    raise RuntimeError(
-        f"Invalid SHORTY_PROVIDER={SHORTY_PROVIDER!r}. "
-        f"Use one of: {sorted(_DEFAULT_SHORTY_MODELS)}"
-    )
-SHORTY_MODEL = (
-    os.environ.get("SHORTY_MODEL") or _DEFAULT_SHORTY_MODELS[SHORTY_PROVIDER]
-).strip()
+# Resolved by config.py (env -> ask_shorty.local.toml -> default); an invalid
+# provider raises config.ConfigError (a RuntimeError).
+import config as _config
+
+SHORTY_PROVIDER = _config.provider()
+_DEFAULT_SHORTY_MODELS = dict(_config.DEFAULT_SHORTY_MODELS)
+SHORTY_MODEL = _config.shorty_model()
 
 
 SHORTY_SYSTEM_PROMPT = """You are a compression engine for video transcripts.

@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 DEFAULT_DOWNLOADS = Path.home() / "Downloads"
-DEFAULT_DB = Path(
-    r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db"
-)
+import config
+
+DEFAULT_DB = config.full_db_path()
 HISTORY_REL = Path("Takeout") / "YouTube and YouTube Music" / "history"
 
 VID_RE = re.compile(

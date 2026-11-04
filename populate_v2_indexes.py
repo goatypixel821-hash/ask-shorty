@@ -101,7 +101,9 @@ def main() -> None:
 
     import os
 
-    db_path = args.db_path or os.environ.get("ASK_SHORTY_DB_PATH") or "data/transcripts.db"
+    import config
+
+    db_path = config.require_db(args.db_path or config.db_path())
     print(f"Using database: {db_path}")
 
     conn = sqlite3.connect(db_path)

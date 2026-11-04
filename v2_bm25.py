@@ -319,7 +319,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build V2 BM25 pickle indexes")
     ap.add_argument("--db-path", default=None)
     args = ap.parse_args()
-    db = args.db_path or os.environ.get("ASK_SHORTY_DB_PATH") or "data/transcripts.db"
+    import config
+
+    db = config.require_db(args.db_path or config.db_path())
     paths = build_all_v2_bm25(db)
     for k, p in paths.items():
         sz = Path(p).stat().st_size

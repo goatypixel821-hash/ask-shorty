@@ -1,5 +1,6 @@
 ﻿import sqlite3
-db = r'C:\Users\number2\Desktop\shorty\data\transcripts.db'
+import config
+db = config.require_db(config.db_path())
 conn = sqlite3.connect(db)
 
 # Check events table schema

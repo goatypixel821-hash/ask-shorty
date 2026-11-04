@@ -14,6 +14,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# config.EXIT_CONFIG: the app hit a config problem (e.g. missing DB); restarting won't help.
+EXIT_CONFIG = 78
+
 
 def _log(msg: str) -> None:
     """Print a log line with timestamp."""
@@ -40,6 +43,9 @@ if __name__ == "__main__":
             if code == 0:
                 _log("Ask Shorty UI exited cleanly. Shutting down supervisor.")
                 sys.exit(0)
+            if code == EXIT_CONFIG:
+                _log("Ask Shorty UI stopped on a configuration error (see above). Not restarting.")
+                sys.exit(code)
 
             # Non-zero exit code: log and restart after short delay
             _log(f"Ask Shorty UI crashed (exit code {code}) — restarting in 2 seconds...")

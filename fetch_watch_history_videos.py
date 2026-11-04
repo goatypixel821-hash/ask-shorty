@@ -48,9 +48,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_VIEWER_DB = Path(
-    r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db"
-)
+import config
+
+DEFAULT_VIEWER_DB = config.viewer_db_default()
 DATA = ROOT / "data"
 FAIL_LOG = DATA / "watch_history_stub_fetch_failures.log"
 RUN_LOG = DATA / "watch_history_stub_fetch.log"
@@ -65,10 +65,8 @@ REMOTE_DB_PATH = "/workspace/transcripts.db"
 
 
 def default_db_path() -> Path:
-    env = os.environ.get("ASK_SHORTY_DB_PATH", "").strip()
-    if env:
-        return Path(env)
-    return DEFAULT_VIEWER_DB
+    # ASK_SHORTY_FULL_DB_PATH / ASK_SHORTY_DB_PATH / local config / viewer default.
+    return config.full_db_path()
 
 
 def default_chroma_dir(db_path: Path) -> Path:

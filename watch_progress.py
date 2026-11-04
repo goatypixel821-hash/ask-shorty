@@ -15,7 +15,9 @@ import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 
-DB = Path(r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db")
+import config
+
+DB = config.full_db_path()
 OLLAMA_URL = "http://127.0.0.1:11434/v1/models"
 TASKS_PER_VIDEO = 4  # shorty + synthetic_questions + entities + triples
 

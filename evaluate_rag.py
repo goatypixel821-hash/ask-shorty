@@ -49,13 +49,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 def _load_shorty_dotenv() -> None:
     """Load ``shorty/.env`` so ASK_SHORTY_* vars apply (optional: pip install python-dotenv)."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=True)
+    import config
+
+    config.load_project_dotenv(override=True)
 
 
 _load_shorty_dotenv()
@@ -185,9 +181,9 @@ def get_rag(db_path: str, chroma_path: Optional[str] = None):
 
 
 # Default Chroma for eval when --chroma-path is omitted (matches Ask Shorty corpus layout).
-_DEFAULT_EVAL_CHROMA = Path(
-    r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcript_chroma_new"
-)
+import config
+
+_DEFAULT_EVAL_CHROMA = config.full_chroma_path()
 
 
 def _resolve_eval_chroma_path(db_path: Path, chroma_arg: Optional[str]) -> Optional[Path]:

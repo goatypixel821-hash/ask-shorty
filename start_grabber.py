@@ -11,6 +11,9 @@ import sys
 import time
 from pathlib import Path
 
+# config.EXIT_CONFIG: the app hit a config problem (e.g. missing DB); restarting won't help.
+EXIT_CONFIG = 78
+
 
 if __name__ == '__main__':
     grabber_script = Path(__file__).parent / 'video_grabber.py'
@@ -32,6 +35,9 @@ if __name__ == '__main__':
             if code == 0:
                 print("\nGrabber exited cleanly. Shutting down supervisor.")
                 sys.exit(0)
+            if code == EXIT_CONFIG:
+                print("\nGrabber stopped on a configuration error (see above). Not restarting.")
+                sys.exit(code)
 
             # Non-zero exit code: log and restart after short delay
             print(f"\n⚠️ Grabber crashed (exit code {code}) — restarting in 2 seconds...")

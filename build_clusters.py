@@ -26,9 +26,11 @@ from pathlib import Path
 
 import numpy as np
 
-FULL_DB   = "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
-LOCAL_DB  = "data/transcripts.db"
-OUT_PATH  = Path("data/clusters.json")
+import config
+
+FULL_DB   = str(config.full_db_path())
+LOCAL_DB  = str(config.db_path())
+OUT_PATH  = config.data_dir() / "clusters.json"
 LABEL_MODEL = "claude-sonnet-4-20250514"   # same model as Ask Shorty
 
 CLUSTER_COLORS = [
@@ -45,7 +47,7 @@ NOISE_COLOR = "#374151"
 
 def load_shorties():
     """Return list of dicts with video_id, title, channel, watch_date, shorty."""
-    conn = sqlite3.connect(FULL_DB)
+    conn = sqlite3.connect(config.require_db(FULL_DB))
     c = conn.cursor()
     c.execute("""
         SELECT v.video_id, v.title, v.channel, v.watch_date, t.shorty
@@ -70,7 +72,7 @@ def load_shorties():
 
 def load_all_videos():
     """Return all videos (with and without Shorties) for timeline data."""
-    conn = sqlite3.connect(FULL_DB)
+    conn = sqlite3.connect(config.require_db(FULL_DB))
     c = conn.cursor()
     c.execute("""
         SELECT v.video_id, v.title, v.channel, v.watch_date,

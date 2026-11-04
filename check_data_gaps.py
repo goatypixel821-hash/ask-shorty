@@ -4,7 +4,9 @@ Diagnostic: check eval contamination, missing triples, processing gaps.
 import sqlite3, json
 from pathlib import Path
 
-DB = r'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db'
+import config
+
+DB = config.require_db(config.full_db_path())
 conn = sqlite3.connect(DB)
 c = conn.cursor()
 
@@ -31,9 +33,9 @@ print("=" * 60)
 print("EVAL DATASET SOURCE")
 print("=" * 60)
 # Check where eval questions come from
-eval_files = list(Path(r'C:\Users\number2\Desktop\shorty\eval_dataset').rglob('*.json')) + \
-             list(Path(r'C:\Users\number2\Desktop\shorty\data').glob('eval_*.json')) + \
-             list(Path(r'C:\Users\number2\Desktop\shorty\data').glob('eval_*.jsonl'))
+eval_files = list((config.REPO_ROOT / 'eval_dataset').rglob('*.json')) + \
+             list(config.data_dir().glob('eval_*.json')) + \
+             list(config.data_dir().glob('eval_*.jsonl'))
 print("Eval dataset files found:", eval_files[:5])
 
 # Check synthetic_questions overlap with eval
@@ -89,7 +91,7 @@ print("=" * 60)
 print("EVAL QUESTION SOURCE CHECK")
 print("=" * 60)
 # Check build_eval_dataset to understand where eval questions come from
-eval_ds_path = Path(r'C:\Users\number2\Desktop\shorty\data\eval_dataset.json')
+eval_ds_path = (config.data_dir() / 'eval_dataset.json')
 if eval_ds_path.exists():
     with open(eval_ds_path) as f:
         data = json.load(f)
@@ -103,7 +105,7 @@ else:
     print("No data/eval_dataset.json found")
 
 # Check the eval_results queries folder for a sample
-eval_dirs = sorted(Path(r'C:\Users\number2\Desktop\shorty\eval_results').iterdir(), reverse=True)
+eval_dirs = sorted((config.REPO_ROOT / 'eval_results').iterdir(), reverse=True)
 if eval_dirs:
     latest = eval_dirs[0]
     q_files = list((latest / 'queries').glob('*.json')) if (latest / 'queries').exists() else []

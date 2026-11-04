@@ -29,9 +29,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
-CANONICAL_DEFAULT = Path(r"C:\Users\number2\Desktop\shorty\data\transcripts.db")
-VIEWER_DEFAULT = Path(r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db")
-BACKUP_DIR_DEFAULT = Path(r"C:\Users\number2\Desktop\shorty\data\db_merge_backups")
+import config
+
+# Fixed locations, deliberately NOT ASK_SHORTY_DB_PATH (which could make both sides
+# the same file). Override with --canonical / --viewer / --backup-dir.
+CANONICAL_DEFAULT = config.repo_db_default()
+VIEWER_DEFAULT = config.viewer_db_default()
+BACKUP_DIR_DEFAULT = config.data_dir() / "db_merge_backups"
 
 
 # Preferred column order when both DBs share the same schema (transcript_database.py).

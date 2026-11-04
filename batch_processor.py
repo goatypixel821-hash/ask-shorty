@@ -1378,8 +1378,8 @@ def main():
         "--db-path",
         type=str,
         default=None,
-        help="Path to transcripts.db (e.g. C:\\Users\\number2\\Desktop\\youtube-history-viewer-copy\\data\\transcripts.db). "
-             "If not provided, uses the default DB for this project.",
+        help="Path to transcripts.db. If not provided, uses config.db_path() "
+             "(ASK_SHORTY_DB_PATH, else ask_shorty.local.toml, else <repo>/data/transcripts.db).",
     )
     parser.add_argument(
         "--queue",

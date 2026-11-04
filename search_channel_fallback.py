@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import config
 import re
 import sqlite3
 from collections import defaultdict
@@ -84,7 +85,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--db-path",
-        default=r"C:\Users\number2\Desktop\shorty\data\transcripts.db",
+        default=str(config.db_path()),
     )
     ap.add_argument(
         "--out-path",

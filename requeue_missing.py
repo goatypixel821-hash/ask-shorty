@@ -9,7 +9,9 @@ Run this before batch_processor.py to make sure all missing data gets regenerate
 import sqlite3
 from pathlib import Path
 
-DB = r'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db'
+import config
+
+DB = config.require_db(config.full_db_path())
 
 conn = sqlite3.connect(DB)
 c = conn.cursor()

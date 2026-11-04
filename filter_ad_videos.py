@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-DEFAULT_DB_PATH = r"C:\Users\number2\Desktop\shorty\data\transcripts.db"
+import config
+
+DEFAULT_DB_PATH = str(config.db_path())
 DEFAULT_CSV_PATH = Path("data") / "pending_review.csv"
 
 BRAND_CHANNEL_KEYWORDS = [
@@ -69,10 +71,7 @@ class PendingVideo:
 def resolve_db_path(cli_db_path: str | None) -> Path:
     if cli_db_path:
         return Path(cli_db_path)
-    env_db = (os.environ.get("ASK_SHORTY_DB_PATH") or "").strip()
-    if env_db:
-        return Path(env_db)
-    return Path(DEFAULT_DB_PATH)
+    return config.db_path()
 
 
 def fetch_pending_videos(db_path: Path) -> List[PendingVideo]:

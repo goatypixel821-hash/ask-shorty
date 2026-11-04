@@ -55,6 +55,7 @@ def main() -> None:
         target=lambda: library_app.app.run(host="127.0.0.1", port=5002, use_reloader=False), daemon=True
     ).start()
     print(f"[fixture-apps] db={env['db_path']} fake_llm_calls={len(fake.calls)}", flush=True)
+    ask_shorty_app.init_app()  # startup work no longer happens at import
     ask_shorty_app.app.run(host="127.0.0.1", port=5001, use_reloader=False, threaded=True)
 
 
