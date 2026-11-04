@@ -158,7 +158,7 @@ def get_video_detail(video_id: str) -> Dict[str, Any]:
         SELECT id, text, shorty
         FROM transcripts
         WHERE video_id = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (video_id,),
@@ -391,7 +391,7 @@ def regenerate_shorty(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()
@@ -435,7 +435,7 @@ def regenerate_questions(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()
@@ -517,7 +517,7 @@ def regenerate_entities(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()

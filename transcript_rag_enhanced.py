@@ -289,7 +289,7 @@ class EnhancedTranscriptRAG:
                 SELECT id, question
                 FROM synthetic_questions
                 WHERE video_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
                 (video_id, len(questions)),
