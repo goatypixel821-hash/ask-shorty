@@ -245,6 +245,8 @@ def store_entities(
     video_id: str,
     entities: List[Dict[str, Any]],
     db: Optional[TranscriptDatabase] = None,
+    *,
+    replace: bool = False,
 ) -> int:
     """
     Store entities into the SQLite `entities` table.
@@ -260,6 +262,9 @@ def store_entities(
     db_obj = db if db is not None else TranscriptDatabase()
     conn = sqlite3.connect(db_obj.db_path)  # type: ignore[attr-defined]
     cursor = conn.cursor()
+    if replace:
+        # Same transaction as the inserts: never leaves the video with zero entities.
+        cursor.execute("DELETE FROM entities WHERE video_id = ?", (video_id,))
 
     count = 0
     for ent in entities:

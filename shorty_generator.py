@@ -313,6 +313,34 @@ def _call_claude(system_prompt: str, user_prompt: str) -> str:
     raise RuntimeError(f"Unsupported SHORTY_PROVIDER={SHORTY_PROVIDER!r}")
 
 
+# A real Shorty body is hundreds of characters with a CONTEXT/TOPICS structure.
+_MIN_SHORTY_BODY_CHARS = 40
+_SHORTY_MARKERS = ("CONTEXT", "TOPIC", "MICRO-DETAILS", "TIMELINE")
+
+
+def validate_shorty_body(body: Optional[str]) -> str:
+    """
+    Reject empty / unusable model output *before* a header is prepended.
+
+    Without this an empty completion (or a JSON error blob) became a Shorty made of
+    only the SOURCE/CHANNEL/DATE header, was saved, and the queue task marked
+    completed, so the video looked processed but had no content.
+    """
+    text = (body or "").strip()
+    if len(text) < _MIN_SHORTY_BODY_CHARS or not any(c.isalpha() for c in text):
+        raise ValueError(
+            f"LLM returned an empty or unusable Shorty body ({len(text)} chars); not saving."
+        )
+    has_marker = any(m in text.upper() for m in _SHORTY_MARKERS)
+    if text[:1] in "{[" and not has_marker:
+        raise ValueError("LLM returned JSON/garbage instead of a Shorty; not saving.")
+    if not has_marker and len(text) < 200:
+        raise ValueError(
+            f"LLM returned an empty or unusable Shorty body ({len(text)} chars, no template sections); not saving."
+        )
+    return text
+
+
 def generate_shorty(
     transcript_text: str,
     title: Optional[str] = None,
@@ -339,7 +367,7 @@ def generate_shorty(
         transcript=transcript_text.strip(),
     )
 
-    body = _call_claude(SHORTY_SYSTEM_PROMPT, user_prompt)
+    body = validate_shorty_body(_call_claude(SHORTY_SYSTEM_PROMPT, user_prompt))
 
     header = (
         f"SOURCE: {safe_title}\n"
@@ -370,6 +398,13 @@ def generate_synthetic_questions(
         title=safe_title,
         transcript=transcript_text.strip(),
     )
+
+    if SHORTY_PROVIDER != "anthropic":
+        # Was hard-wired to the Anthropic tool-use API even though the default
+        # SHORTY_PROVIDER is openrouter, so library_app 'regenerate questions'
+        # required ANTHROPIC_API_KEY. OpenRouter path: plain JSON array.
+        raw = _call_claude(SYNTHETIC_Q_SYSTEM_PROMPT, user_prompt)
+        return _parse_question_array(raw)[:n]
 
     client = get_client()
 
@@ -428,6 +463,26 @@ def generate_synthetic_questions(
         raw_questions = raw_questions[:n]
 
     return raw_questions
+
+
+def _parse_question_array(raw: str) -> List[str]:
+    import json
+    import re
+
+    text = (raw or "").strip()
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if m:
+        text = m.group(1).strip()
+    s, e = text.find("["), text.rfind("]")
+    if s == -1 or e <= s:
+        logger.warning("Synthetic questions: model output had no JSON array.")
+        return []
+    try:
+        data = json.loads(text[s : e + 1])
+    except json.JSONDecodeError:
+        logger.warning("Synthetic questions: model output was not valid JSON.")
+        return []
+    return [q.strip() for q in data if isinstance(q, str) and q.strip()] if isinstance(data, list) else []
 
 
 def generate_shorty_and_questions_for_video(

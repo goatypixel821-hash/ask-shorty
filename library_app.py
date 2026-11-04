@@ -528,15 +528,13 @@ def regenerate_entities(video_id: str):
 
     transcript_text = row["text"]
 
-    # Delete existing entities
-    cur.execute("DELETE FROM entities WHERE video_id = ?", (video_id,))
-    conn.commit()
     conn.close()
 
-    # Extract and store new entities
+    # Extract first, then replace in one transaction. Deleting before extracting
+    # left the video with no entities whenever the LLM call failed.
     entities = extract_entities(transcript_text, title=title)
     if entities:
-        store_entities(video_id, entities, db=TranscriptDatabase(DB_PATH))
+        store_entities(video_id, entities, db=TranscriptDatabase(DB_PATH), replace=True)
         flash(f"Regenerated {len(entities)} entities.", "success")
     else:
         flash("No entities extracted from transcript.", "warning")
