@@ -330,8 +330,15 @@ def _collect_verification_excerpts(
 
 
 def _strip_thousands_separators(text: str) -> str:
-    """Join digit groups split by commas/spaces/etc. so 34,899 == 34899 for audits."""
-    return re.sub(r"(?<=\d)[,_\u00a0\u202f\s](?=\d)", "", text or "")
+    """
+    Join thousands groups so 34,899 == 34899 for audits.
+
+    Only a comma / underscore / (narrow) no-break space followed by exactly three
+    digits counts as a thousands separator. The old pattern also joined ordinary
+    whitespace and any digit run, so "March 14 2021" became "142021" and
+    "2019 450 people" became "2019450": false 'number not in context' flags.
+    """
+    return re.sub(r"(?<=\d)[,_\u00a0\u202f](?=\d{3}(?!\d))", "", text or "")
 
 
 def _normalize_phrase_for_match(text: str) -> str:
@@ -366,7 +373,8 @@ def _audit_answer_against_blob(
     if novel_nums:
         flags.append(numbers_flag_prefix + ",".join(novel_nums[:12]))
     blob_phrase_norm = _normalize_phrase_for_match(blob_raw)
-    for phrase in re.findall(r'"([^"]{8,80})"', answer or ""):
+    # Straight and curly double quotes (models often emit “…”).
+    for phrase in re.findall(r'["\u201c]([^"\u201c\u201d]{8,80})["\u201d]', answer or ""):
         pl = phrase.lower()
         if pl in blob_lower:
             continue
@@ -1748,7 +1756,12 @@ Videos included in context below (title | channel | watch date):
 
         # Part 2: non-blocking grounding audit (log/flag only — never rewrite).
         grounding_audit: List[str] = []
-        _append_v2_grounding_audit_flags(answer_text, user_p, grounding_audit)
+        # Audit against the evidence only. user_p also contains the question, so a
+        # number or phrase the user typed counted as "in context" even when no
+        # retrieved block supported it.
+        _append_v2_grounding_audit_flags(
+            answer_text, stats_block + "\n" + "\n---\n".join(blocks), grounding_audit
+        )
         dbg["grounding_audit"] = list(grounding_audit)
         if grounding_audit:
             _emit(
