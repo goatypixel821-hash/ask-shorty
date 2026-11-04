@@ -668,11 +668,7 @@ class AskShorty:
 
         rag = self._get_rag()
         for q in query_variants:
-            res = rag.collection.query(
-                query_texts=[q],
-                n_results=top_k,
-                where=where if where else None,
-            )
+            res = rag.query([q], n_results=top_k, where=where if where else None)
             ids = res.get("ids", [[]])[0]
             docs = res.get("documents", [[]])[0]
             metas = res.get("metadatas", [[]])[0]
@@ -2425,11 +2421,7 @@ Given a natural language question, extract:
                 shorty_where["video_id"] = {"$in": candidate_videos}
 
             rag = self._get_rag()
-            res = rag.collection.query(
-                query_texts=rewrites,
-                n_results=MAX_SHORTIES_IN_CONTEXT,
-                where=shorty_where,
-            )
+            res = rag.query(rewrites, n_results=MAX_SHORTIES_IN_CONTEXT, where=shorty_where)
             # Flatten results across rewrites
             all_ids = res.get("ids", [])
             all_docs = res.get("documents", [])
@@ -2500,6 +2492,7 @@ Given a natural language question, extract:
                     self.db.db_path,  # type: ignore[attr-defined]
                     q,
                     rag_collection=rag.collection,
+                    embed_fn=rag._embed_texts,
                     bm25_search=bm,
                     enable_bm25=ENABLE_BM25,
                     enable_graph=ENABLE_GRAPH,

@@ -142,6 +142,21 @@ class EnhancedTranscriptRAG:
         embeddings = self.embedding_model.encode(texts, show_progress_bar=False)
         return [emb.tolist() for emb in embeddings]
 
+    def query(self, query_texts: List[str], n_results: int, where: Optional[Dict] = None):
+        """
+        Query Chroma with embeddings from *this* RAG's model.
+
+        ``collection.query(query_texts=...)`` embeds with Chroma's built-in default
+        model, not the SentenceTransformer that indexed the documents. With the
+        fine-tuned model (chroma_model.txt) that puts queries and documents in
+        different vector spaces and returns near-random neighbours.
+        """
+        return self.collection.query(
+            query_embeddings=self._embed_texts(list(query_texts)),
+            n_results=n_results,
+            where=where,
+        )
+
     # ---------- Chroma indexing ----------
 
     def index_single_transcript(
