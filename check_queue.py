@@ -1,5 +1,6 @@
 import sqlite3
-db = r'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db'
+import config
+db = config.require_db(config.full_db_path())
 conn = sqlite3.connect(db)
 c = conn.cursor()
 
@@ -53,7 +54,7 @@ print()
 print("=== SAMPLE EVAL QUERY ARTIFACT ===")
 import json
 from pathlib import Path
-eval_dirs = sorted(Path(r'C:\Users\number2\Desktop\shorty\eval_results').iterdir(), reverse=True)
+eval_dirs = sorted((config.REPO_ROOT / 'eval_results').iterdir(), reverse=True)
 for d in eval_dirs[:3]:
     qdir = d / 'queries'
     if qdir.exists():

@@ -3,7 +3,7 @@
 Generate structured course packages from clusters.json + full corpus SQLite.
 
 Uses claude-sonnet-4-20250514 with aggressive disk caching (data/course_llm_cache/).
-Full corpus DB: set ASK_SHORTY_FULL_DB or use default path in DEFAULT_FULL_DB.
+Full corpus DB: config.full_db_path() (ASK_SHORTY_FULL_DB_PATH / ASK_SHORTY_FULL_DB / ASK_SHORTY_DB_PATH / local config / default).
 """
 
 from __future__ import annotations
@@ -25,7 +25,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_FULL_DB = "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
+import config
+
+
+def _default_full_db() -> str:
+    return str(config.full_db_path())
+
 CLUSTERS_PATH = ROOT / "data" / "clusters.json"
 COURSES_DIR = ROOT / "data" / "courses"
 CATALOG_PATH = ROOT / "data" / "course_catalog.json"
@@ -834,7 +839,7 @@ def _build_course_inner(
         "prerequisites": wrap.get("prerequisites") or [],
         "top_channels": top_channels,
         "generated_at": datetime.now().isoformat(),
-        "source_db": os.environ.get("ASK_SHORTY_FULL_DB", DEFAULT_FULL_DB),
+        "source_db": _default_full_db(),
     }
 
     COURSES_DIR.mkdir(parents=True, exist_ok=True)
@@ -997,7 +1002,7 @@ def run_generation(
     emit: EmitFn = None,
     missing_only: bool = False,
 ) -> List[dict]:
-    db_path = full_db or os.environ.get("ASK_SHORTY_FULL_DB") or DEFAULT_FULL_DB
+    db_path = config.require_db(full_db or _default_full_db())
     if not Path(db_path).exists():
         raise FileNotFoundError(f"Full corpus DB not found: {db_path}")
 

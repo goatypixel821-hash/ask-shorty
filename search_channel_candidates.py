@@ -8,6 +8,7 @@ Writes a human-readable report to data/channel_search_results.txt.
 from __future__ import annotations
 
 import argparse
+import config
 import json
 import re
 import sqlite3
@@ -327,7 +328,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Search likely channel from transcripts.db")
     ap.add_argument(
         "--db-path",
-        default=r"C:\Users\number2\Desktop\shorty\data\transcripts.db",
+        default=str(config.db_path()),
         help="Path to SQLite DB",
     )
     ap.add_argument(

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from transcript_database import TranscriptDatabase
 
-DB_PATH = r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db"
+import config
+
+DB_PATH = str(config.full_db_path())
 VIDEO_ID = "cs6QY20JYB0"
 VIDEO_TITLE = "Frontier A321 Hits Person on Runway During Takeoff | Captain Steeeve"
 VIDEO_CHANNEL = "Captain Steeeve"

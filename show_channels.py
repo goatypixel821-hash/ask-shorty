@@ -1,6 +1,8 @@
-﻿import sqlite3
+﻿import config
+import sqlite3
 from collections import Counter
-db = r'C:\Users\number2\Desktop\shorty\data\transcripts.db'
+import config
+db = config.require_db(config.db_path())
 conn = sqlite3.connect(db)
 rows = conn.execute("""
     SELECT channel, COUNT(*) as cnt 

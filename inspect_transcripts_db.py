@@ -1,10 +1,12 @@
 import sqlite3
 
-DB_PATH = r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db"
+import config
+
+DB_PATH = str(config.full_db_path())
 
 
 def main() -> None:
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(config.require_db(DB_PATH))
     cur = con.cursor()
     tables = [row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
     print("tables:", tables)

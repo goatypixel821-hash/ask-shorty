@@ -1,5 +1,6 @@
 ﻿import sqlite3, json
-db = r'C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db'
+import config
+db = config.require_db(config.full_db_path())
 conn = sqlite3.connect(db)
 rows = conn.execute("SELECT video_id, json_metadata FROM videos WHERE json_metadata IS NOT NULL LIMIT 3").fetchall()
 for vid, meta in rows:

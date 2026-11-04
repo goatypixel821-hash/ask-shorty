@@ -117,14 +117,16 @@ def _index_one_video(db_path: str, chroma_dir: Path, video_id: str) -> None:
 
 
 def main() -> None:
-    FULL_DB = "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
+    import config
+
+    FULL_DB = str(config.full_db_path())
 
     parser = argparse.ArgumentParser(description="Rebuild Chroma from SQLite for videos with Shorty (or all transcripts).")
     parser.add_argument(
         "--db-path",
         type=str,
         default=FULL_DB,
-        help="Path to transcripts.db (default: full corpus DB)",
+        help="Path to transcripts.db (default: config full_db_path)",
     )
     parser.add_argument(
         "--video-id",

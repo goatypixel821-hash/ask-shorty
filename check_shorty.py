@@ -1,5 +1,6 @@
 ﻿import sqlite3
-db = r'C:\Users\number2\Desktop\shorty\data\transcripts.db'
+import config
+db = config.require_db(config.db_path())
 conn = sqlite3.connect(db)
 for vid in ['LwcJM51BDUM', 'cgp-gfSbmNE']:
     r = conn.execute("SELECT shorty FROM transcripts WHERE video_id=?", (vid,)).fetchone()

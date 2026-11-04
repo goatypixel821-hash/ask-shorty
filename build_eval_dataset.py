@@ -21,8 +21,8 @@ Outputs (all under eval_data/candidates/, which is git-ignored):
   build_stats.json
 
 Auto-detection: if no --db-path is given, the script searches known locations for
-the largest transcripts.db and uses that.  On this machine the full corpus is at:
-  C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db
+the largest transcripts.db and uses that.  On Shaun's machine the full corpus is at:
+  ~/Desktop/youtube-history-viewer-copy/data/transcripts.db  (config.py full_db_path)
 
 Usage:
   python build_eval_dataset.py                         # auto-detects full corpus
