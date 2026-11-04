@@ -33,7 +33,11 @@ class QueryRouter:
         r"\b(compare|versus|vs\.?|difference|contrast|similarit(y|ies))\b", re.I
     )
     _CAUSE = re.compile(
-        r"\b(why|because|cause|effect|led to|resulted in|due to|consequence)\b", re.I
+        # Inflections matter: "what caused X" is the most common phrasing and the old
+        # bare "cause" (with \b on both sides) did not match it.
+        r"\b(why|because|caus(?:e|es|ed|ing)|effects?|leads? to|led to|results? in|resulted in|"
+        r"due to|consequences?)\b",
+        re.I,
     )
     _WHERE = re.compile(
         r"\b(where in (this |the |that )?video|timestamp|what time|"

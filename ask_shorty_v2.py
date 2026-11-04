@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from functools import lru_cache
@@ -818,15 +819,26 @@ class AskShortyV2:
         self._ce: Any = None
 
     def _lazy_load(self) -> None:
-        if self._maps is not None:
-            return
-        self._maps = _get_shared_v2_memory_maps(self.db_path)
+        if self._maps is None:
+            self._maps = _get_shared_v2_memory_maps(self.db_path)
+        # Re-resolved on every call (cheap: a stat when unchanged) so rebuilt
+        # pickles are picked up without restarting the app.
         vpath = self.index_dir / "video_bm25_index.pkl"
         spath = self.index_dir / "segment_bm25_index.pkl"
         epath = self.index_dir / "event_bm25_index.pkl"
         self._video_bm25 = load_shared_bm25_index(vpath)
         self._seg_bm25 = load_shared_bm25_index(spath)
         self._evt_bm25 = load_shared_bm25_index(epath)
+        # A missing pickle used to make that retrieval layer silently empty.
+        missing = [p.name for p in (vpath, spath, epath) if not p.is_file()]
+        if missing and missing != getattr(self, "missing_indexes", None):
+            print(
+                f"[ask_shorty_v2] WARNING: V2 BM25 index file(s) missing in {self.index_dir}: "
+                f"{', '.join(missing)} — run populate_v2_indexes.py then v2_bm25.py",
+                file=sys.stderr,
+                flush=True,
+            )
+        self.missing_indexes = missing
 
     def _get_cross_encoder(self) -> Any:
         if self._ce is None:
@@ -983,6 +995,7 @@ class AskShortyV2:
             timing["cross_encoder_skipped"] = False
             timing["retrieve_total_ms"] = _ms_since(t_retrieve0)
             return [], {
+                "missing_v2_indexes": list(getattr(self, "missing_indexes", []) or []),
                 "route_type": route,
                 "route_reason": route_res.reason,
                 "topic_watch_sort": route_res.topic_watch_sort,
@@ -1220,6 +1233,7 @@ class AskShortyV2:
         timing["retrieve_total_ms"] = _ms_since(t_retrieve0)
 
         debug: Dict[str, Any] = {
+            "missing_v2_indexes": list(getattr(self, "missing_indexes", []) or []),
             "route_type": route,
             "route_reason": route_res.reason,
             "topic_watch_sort": route_res.topic_watch_sort,
@@ -1459,6 +1473,16 @@ class AskShortyV2:
         )
         dbg["timing_ms"] = _tim
         seg_by_vid: Dict[str, List[str]] = (dbg or {}).get("segment_hits") or {}
+        if dbg.get("missing_v2_indexes"):
+            _emit(
+                "warning",
+                label=(
+                    "V2 — index file(s) missing, retrieval degraded: "
+                    + ", ".join(dbg["missing_v2_indexes"])
+                    + " (run populate_v2_indexes.py, then v2_bm25.py)"
+                ),
+                missing=list(dbg["missing_v2_indexes"]),
+            )
 
         _emit(
             "step",
