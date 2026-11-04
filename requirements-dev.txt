@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8
+# The UI check (tests/ui/run_ui_check.js) uses the Node "playwright" package + Chromium.

@@ -10,8 +10,32 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
+# Question words / function words matched almost every fact row ("is", "the",
+# "who", "of"), so with an unordered LIMIT the real match could be cut off.
+_STOPWORDS = frozenset(
+    "a an and are as at be been but by can could did do does for from had has have how i if in "
+    "into is it its me my of on one or our that the their them then there these they this those "
+    "to us was we were what when where which who whom why will with would you your about".split()
+)
+
+
 def _tokens(q: str) -> List[str]:
-    return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", q) if len(t) >= 2]
+    out: List[str] = []
+    for t in re.findall(r"[A-Za-z0-9]+", q):
+        t = t.lower()
+        if len(t) >= 2 and t not in _STOPWORDS and t not in out:
+            out.append(t)
+    return out
+
+
+def _like_escape(s: str) -> str:
+    """Escape LIKE wildcards so entity text is matched literally (ESCAPE '\\')."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _conf(v: Any) -> float:
+    # `float(v or 1.0)` turned an explicit 0.0 confidence into 1.0.
+    return 1.0 if v is None else float(v)
 
 
 class GraphSearch:
@@ -36,20 +60,21 @@ class GraphSearch:
             except sqlite3.OperationalError:
                 return []
 
-            placeholders = " OR ".join(
-                "(LOWER(subject) LIKE ? OR LOWER(object) LIKE ? OR LOWER(relation) LIKE ?)"
-                for _ in words
-            )
-            params: List[Any] = []
-            for w in words:
-                like = f"%{w}%"
-                params.extend([like, like, like])
+            # Rank candidate rows by how many query tokens they contain *before*
+            # applying the LIMIT, so the cap drops the weakest matches, not arbitrary ones.
+            blob = "LOWER(subject || ' ' || relation || ' ' || object)"
+            hit_expr = " + ".join(f"({blob} LIKE ? ESCAPE '\\')" for _ in words)
+            params: List[Any] = [f"%{_like_escape(w)}%" for w in words]
 
             cur.execute(
                 f"""
                 SELECT video_id, subject, relation, object, confidence
-                FROM facts
-                WHERE {placeholders}
+                FROM (
+                    SELECT video_id, subject, relation, object, confidence, ({hit_expr}) AS hits
+                    FROM facts
+                )
+                WHERE hits > 0
+                ORDER BY hits DESC, confidence DESC
                 LIMIT 200
                 """,
                 params,
@@ -67,7 +92,7 @@ class GraphSearch:
             obj = (r["object"] or "").strip()
             line = f"{sub} — {rel} — {obj}"
             overlap = sum(1 for w in words if w in (sub + " " + rel + " " + obj).lower())
-            sc = float(r["confidence"] or 1.0) * (1.0 + overlap)
+            sc = _conf(r["confidence"]) * (1.0 + overlap)
             scores[vid] = scores.get(vid, 0.0) + sc
             if vid not in snippets or len(line) > len(snippets.get(vid, "")):
                 snippets[vid] = line
@@ -80,11 +105,11 @@ class GraphSearch:
         if entities and rows:
             eh = list(entities)[:40]
             sub_clauses = " OR ".join(
-                "(LOWER(subject) LIKE ? OR LOWER(object) LIKE ?)" for _ in eh
+                "(LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(object) LIKE ? ESCAPE '\\')" for _ in eh
             )
             flat: List[str] = []
             for e in eh:
-                like = f"%{e}%"
+                like = f"%{_like_escape(e)}%"
                 flat.extend([like, like])
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -104,7 +129,7 @@ class GraphSearch:
                     rel = (r["relation"] or "").strip()
                     obj = (r["object"] or "").strip()
                     line = f"{sub} — {rel} — {obj}"
-                    scores[vid] = scores.get(vid, 0.0) + 0.3 * float(r["confidence"] or 1.0)
+                    scores[vid] = scores.get(vid, 0.0) + 0.3 * _conf(r["confidence"])
                     if vid not in snippets:
                         snippets[vid] = line
 

@@ -27,7 +27,11 @@ from entity_extractor import extract_entities, store_entities
 from transcript_database import TranscriptDatabase
 
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "transcripts.db")
+# Honour ASK_SHORTY_DB_PATH like every other module; the hard-coded repo path meant
+# the library browsed a different (often empty) DB than the Ask app.
+DB_PATH = os.environ.get("ASK_SHORTY_DB_PATH") or os.path.join(
+    os.path.dirname(__file__), "data", "transcripts.db"
+)
 PAGE_SIZE = 50
 
 
@@ -158,7 +162,7 @@ def get_video_detail(video_id: str) -> Dict[str, Any]:
         SELECT id, text, shorty
         FROM transcripts
         WHERE video_id = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (video_id,),
@@ -391,7 +395,7 @@ def regenerate_shorty(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()
@@ -435,7 +439,7 @@ def regenerate_questions(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()
@@ -517,7 +521,7 @@ def regenerate_entities(video_id: str):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
         (video_id,),
     )
     row = cur.fetchone()
@@ -528,15 +532,13 @@ def regenerate_entities(video_id: str):
 
     transcript_text = row["text"]
 
-    # Delete existing entities
-    cur.execute("DELETE FROM entities WHERE video_id = ?", (video_id,))
-    conn.commit()
     conn.close()
 
-    # Extract and store new entities
+    # Extract first, then replace in one transaction. Deleting before extracting
+    # left the video with no entities whenever the LLM call failed.
     entities = extract_entities(transcript_text, title=title)
     if entities:
-        store_entities(video_id, entities, db=TranscriptDatabase(DB_PATH))
+        store_entities(video_id, entities, db=TranscriptDatabase(DB_PATH), replace=True)
         flash(f"Regenerated {len(entities)} entities.", "success")
     else:
         flash("No entities extracted from transcript.", "warning")

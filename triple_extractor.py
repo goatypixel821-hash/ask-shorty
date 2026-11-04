@@ -168,7 +168,9 @@ def extract_triples(
         if cached is not None:
             return cached
     triples = extract_triples_anthropic(shorty_text, title)
-    if use_cache:
+    # Don't cache an empty result: a garbage/empty response was cached forever and
+    # every later run returned [] without calling the model again.
+    if use_cache and triples:
         try:
             save_cached_triples(cache_file, triples)
         except Exception as exc:

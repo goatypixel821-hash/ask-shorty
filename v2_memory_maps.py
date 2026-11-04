@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import time
@@ -82,14 +83,21 @@ class V2MemoryMaps:
     def instant_candidates(self, query_lower: str, max_per_channel: int = 200) -> List[str]:
         """Cheap lexical overlap: union alias + topic hits for query tokens."""
         cands: Set[str] = set()
-        toks = [t for t in query_lower.split() if len(t) >= 3][:24]
+        # Word tokens, keeping inner '.'/'-' (versions, "kestrel-migrate"). The old
+        # str.split() kept trailing punctuation, so "tidewater?" never matched.
+        all_toks = re.findall(r"[a-z0-9]+(?:[.\-][a-z0-9]+)*", (query_lower or "").lower())
+        toks = [t for t in all_toks if len(t) >= 3][:24]
         for t in toks:
             if t in self.alias_to_videos:
                 cands |= self.alias_to_videos[t]
-        # phrase scan — crude: check 2-grams
-        for i in range(len(toks) - 1):
-            bg = f"{toks[i]} {toks[i+1]}"
+        # phrase scan: 2-grams against topic phrases and multi-word aliases
+        # ("marcus oyelaran" was unreachable via single-token lookups).
+        for i in range(len(all_toks) - 1):
+            bg = f"{all_toks[i]} {all_toks[i+1]}"
             if bg in self.topic_to_videos:
                 cands |= self.topic_to_videos[bg]
-        out = list(cands)
-        return out[:max_per_channel]
+            if bg in self.alias_to_videos:
+                cands |= self.alias_to_videos[bg]
+        # Sorted: set order varies with hash seed, which made the capped candidate
+        # pool (and so answers) differ between runs.
+        return sorted(cands)[:max_per_channel]

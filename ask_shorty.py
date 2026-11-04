@@ -328,7 +328,9 @@ def _call_claude_json_array(system_prompt: str, user_prompt: str) -> List[str]:
         if arr:
             return arr
         logger.warning("Query rewriting returned non-JSON; falling back to original question.")
-        return [user_prompt.strip()]
+        # Was [user_prompt]: the whole rewrite *template*, which then got searched
+        # as a query variant. Callers already prepend the original question.
+        return []
 
     client = get_client()
 
@@ -380,7 +382,9 @@ def _call_claude_json_array(system_prompt: str, user_prompt: str) -> List[str]:
 
     if not rewrites:
         logger.warning("Query rewriting tool returned no queries; falling back to original.")
-        return [user_prompt.strip()]
+        # Was [user_prompt]: the whole rewrite *template*, which then got searched
+        # as a query variant. Callers already prepend the original question.
+        return []
     return rewrites
 
 
@@ -437,6 +441,7 @@ class AskShorty:
         shorty_results: List[Dict[str, Any]],
         synq_results: List[Dict[str, Any]],
         hsc_rank: Optional[List[str]] = None,
+        restrict_videos: Optional[set] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         """
         Merge vector layers with optional BM25 + graph using RRF; adjust scores for reranking.
@@ -445,6 +450,14 @@ class AskShorty:
         from bm25_index import reciprocal_rank_fusion
 
         vector_rank = self._vector_video_rank(chunk_results, shorty_results, synq_results)
+
+        # The caller's video_ids filter was applied to the vector layers only; BM25,
+        # graph and HSC hits outside it were fused back in and cited.
+        def _allowed(vid: str) -> bool:
+            return not restrict_videos or vid in restrict_videos
+
+        if hsc_rank:
+            hsc_rank = [v for v in hsc_rank if _allowed(v)]
         lists: List[List[str]] = []
         if hsc_rank:
             lists.append(hsc_rank)
@@ -457,7 +470,7 @@ class AskShorty:
         if ENABLE_BM25:
             try:
                 bm25 = self._get_bm25()
-                bm25_hits = bm25.search(question, top_k=RERANK_TOP_K_INPUT)
+                bm25_hits = [h for h in bm25.search(question, top_k=RERANK_TOP_K_INPUT) if _allowed(h["video_id"])]
                 lists.append([h["video_id"] for h in bm25_hits])
             except Exception as exc:
                 logger.warning("BM25 search failed: %s", exc)
@@ -467,7 +480,7 @@ class AskShorty:
                 from graph_search import GraphSearch
 
                 gs = GraphSearch(self.db.db_path)  # type: ignore[attr-defined]
-                graph_hits = gs.search(question, top_k=15)
+                graph_hits = [h for h in gs.search(question, top_k=15) if _allowed(h["video_id"])]
                 lists.append([h["video_id"] for h in graph_hits])
             except Exception as exc:
                 logger.warning("Graph search failed: %s", exc)
@@ -496,11 +509,25 @@ class AskShorty:
                 parts.append("graph")
             return ",".join(parts) if parts else "vector"
 
+        # Fused scores must stay in the cosine-distance domain the rest of the
+        # pipeline assumes (lower is better, 0..2): the reranker normalises with
+        # 1 - score/2. The old value (-rrf + 0.01*dist) was negative, which pushed
+        # every group's retrieval term to ~1.01 and erased the fusion signal.
+        max_rrf = max(rrf_map.values()) if rrf_map else 0.0
+
+        def _fused_distance(vid: str, dist: float) -> float:
+            if max_rrf <= 0:
+                return dist
+            # Top fused video -> 0.0; tiny cosine tie-break keeps chunk order within a video.
+            return min(2.0, 2.0 * (1.0 - rrf_map[vid] / max_rrf) + 0.001 * max(0.0, dist))
+
         for r in chunk_results + shorty_results + synq_results:
             m = dict(r.get("metadata") or {})
             vid = m.get("video_id")
             if vid and vid in rrf_map:
-                r["score"] = -rrf_map[vid] + 0.01 * float(r.get("score", 1.0))
+                dist = float(r.get("score", 1.0))
+                m["vector_distance"] = dist
+                r["score"] = _fused_distance(vid, dist)
             if vid:
                 m["fusion_source"] = _prov(vid)
                 r["metadata"] = m
@@ -549,7 +576,7 @@ class AskShorty:
                 {
                     "id": f"{vid}:bm25:synth",
                     "text": best_text,
-                    "score": -rrf_map[vid],
+                    "score": _fused_distance(vid, 2.0),
                     "metadata": {
                         "video_id": vid,
                         "type": "chunk",
@@ -568,7 +595,7 @@ class AskShorty:
                 {
                     "id": f"{vid}:graph:synth",
                     "text": h.get("text_preview") or "",
-                    "score": -rrf_map[vid],
+                    "score": _fused_distance(vid, 2.0),
                     "metadata": {
                         "video_id": vid,
                         "type": "chunk",
@@ -578,6 +605,11 @@ class AskShorty:
                 }
             )
             synth_added.add(vid)
+
+        # Re-sort so callers that slice [:top_k] (the default no-rerank path) see
+        # the fused order; previously they silently kept the raw cosine order.
+        for lst in (chunk_results, shorty_results, synq_results):
+            lst.sort(key=lambda x: float(x.get("score", 2.0)))
 
         preview = [
             {"video_id": vid, "rrf": round(sc, 5), "sources": _prov(vid)}
@@ -642,7 +674,13 @@ class AskShorty:
 
     def _rewrite_query(self, question: str) -> List[str]:
         user_prompt = QUERY_REWRITE_USER_TEMPLATE.format(question=question.strip())
-        rewrites = _call_claude_json_array(QUERY_REWRITE_SYSTEM, user_prompt)
+        try:
+            rewrites = _call_claude_json_array(QUERY_REWRITE_SYSTEM, user_prompt)
+        except Exception as exc:
+            # Rewrites are an optional recall boost; an LLM timeout/error here used to
+            # abort the whole answer. Fall back to the original question (as V2 does).
+            logger.warning("Query rewrite failed; using original question only: %r", exc)
+            rewrites = []
         # Always include original question as first element
         base = [question.strip()]
         for q in rewrites:
@@ -668,11 +706,7 @@ class AskShorty:
 
         rag = self._get_rag()
         for q in query_variants:
-            res = rag.collection.query(
-                query_texts=[q],
-                n_results=top_k,
-                where=where if where else None,
-            )
+            res = rag.query([q], n_results=top_k, where=where if where else None)
             ids = res.get("ids", [[]])[0]
             docs = res.get("documents", [[]])[0]
             metas = res.get("metadatas", [[]])[0]
@@ -2425,11 +2459,7 @@ Given a natural language question, extract:
                 shorty_where["video_id"] = {"$in": candidate_videos}
 
             rag = self._get_rag()
-            res = rag.collection.query(
-                query_texts=rewrites,
-                n_results=MAX_SHORTIES_IN_CONTEXT,
-                where=shorty_where,
-            )
+            res = rag.query(rewrites, n_results=MAX_SHORTIES_IN_CONTEXT, where=shorty_where)
             # Flatten results across rewrites
             all_ids = res.get("ids", [])
             all_docs = res.get("documents", [])
@@ -2500,6 +2530,7 @@ Given a natural language question, extract:
                     self.db.db_path,  # type: ignore[attr-defined]
                     q,
                     rag_collection=rag.collection,
+                    embed_fn=rag._embed_texts,
                     bm25_search=bm,
                     enable_bm25=ENABLE_BM25,
                     enable_graph=ENABLE_GRAPH,
@@ -2512,7 +2543,8 @@ Given a natural language question, extract:
 
         if ENABLE_BM25 or ENABLE_GRAPH or ENABLE_HSC:
             chunk_results, shorty_results, synq_results, fusion_debug = self._apply_rrf_fusion(
-                q, chunk_results, shorty_results, synq_results, hsc_rank=hsc_rank
+                q, chunk_results, shorty_results, synq_results, hsc_rank=hsc_rank,
+                restrict_videos=set(video_ids) if video_ids else None,
             )
             if hsc_ctx:
                 fusion_debug["query_type"] = hsc_ctx.get("query_type")

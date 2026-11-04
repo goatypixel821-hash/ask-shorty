@@ -240,7 +240,7 @@ def vectorize_video_in_background(video_id: str):
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
                 (video_id,)
             )
             row = cursor.fetchone()

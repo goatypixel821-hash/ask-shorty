@@ -5,3 +5,11 @@ torch
 numpy
 rank-bm25
 nltk>=3.8
+# Previously missing (imported by the apps / LLM clients / grabber):
+flask>=3.0
+openai>=1.0
+anthropic>=0.30
+requests
+httpx
+youtube-transcript-api
+yt-dlp

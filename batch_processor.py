@@ -55,6 +55,7 @@ from shorty_generator import (
     SHORTY_USER_PROMPT_TEMPLATE,
     SYNTHETIC_Q_SYSTEM_PROMPT,
     SYNTHETIC_Q_USER_PROMPT_TEMPLATE,
+    validate_shorty_body,
 )
 from entity_extractor import (
     extract_entities,
@@ -957,7 +958,7 @@ def process_batch(
             _log("  -> Extracting entities...")
             entities = entity_fn(transcript_text, title=final_title)
             if entities:
-                count = store_entities(video_id, entities, db=db)
+                count = store_entities(video_id, entities, db=db, replace=True)
                 _log(f"  ✓ Stored {count} entities.")
             else:
                 _log("  ! No entities extracted.")
@@ -1188,7 +1189,9 @@ def process_queue_tasks(
                     _log("  -> Extracting entities...")
                     entities = _call_with_connection_retries(entity_fn, transcript_text, title=final_title)
                     if entities:
-                        count = store_entities(current_video_id, entities, db=db)
+                        # replace=True: re-running the task used to append a second
+                        # copy of every entity for the video.
+                        count = store_entities(current_video_id, entities, db=db, replace=True)
                         _log(f"  ✓ Stored {count} entities.")
                     else:
                         _log("  ! No entities extracted.")
@@ -1209,6 +1212,13 @@ def process_queue_tasks(
                     if triple_raw_sink is not None:
                         triple_raw_sink.clear()
                     triples = _call_with_connection_retries(triples_fn, shorty_text, final_title)
+                    if not triples:
+                        # Garbage/empty JSON parses to []; replace_facts_for_video([])
+                        # used to DELETE the video's existing facts and mark completed.
+                        msg = "LLM returned no parseable triples; existing facts kept."
+                        _log(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        continue
                     n_stored = db.replace_facts_for_video(current_video_id, triples)
                     _log(f"  ✓ Stored {n_stored} triples.")
                     slen = len(shorty_text.strip())
@@ -1268,6 +1278,11 @@ def process_queue_tasks(
                         for s in segs
                         if (s.get("summary") or "").strip()
                     ]
+                    if not rows:
+                        msg = "LLM returned no parseable segments; existing segments kept."
+                        _log(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        continue
                     n_seg = db.replace_segments_for_video(current_video_id, rows)
                     _log(f"  ✓ Stored {n_seg} segments.")
                     update_queue_task_status(db, task_id, "completed", None)
@@ -1286,6 +1301,13 @@ def process_queue_tasks(
                         shorty_text,
                         chat_fn=hsc_chat_fn,
                     )
+                    if not evs and db.count_events_for_video(current_video_id) > 0:
+                        # A video may legitimately have no causal events, but an empty
+                        # parse must not wipe events that a previous run extracted.
+                        msg = "LLM returned no parseable events; existing events kept."
+                        _log(f"  ! {msg}")
+                        update_queue_task_status(db, task_id, "failed", msg)
+                        continue
                     n_ev = db.replace_events_for_video(current_video_id, evs)
                     _log(f"  ✓ Stored {n_ev} events.")
                     update_queue_task_status(db, task_id, "completed", None)
@@ -1445,7 +1467,9 @@ def main():
                 f"    - pass --provider openrouter (uses --model), or\n"
                 f"    - pass --provider openai-compatible with --base-url / --model."
             )
-            return
+            # Non-zero exit: a bare `return` exited 0, so wrapper scripts carried on
+            # as if the batch had run.
+            raise SystemExit(2)
 
     triple_raw_sink: Optional[List[str]] = None
     if args.debug_zero_triples and provider not in ("openai-compatible", "openrouter"):
@@ -1529,7 +1553,9 @@ def main():
                 upload_date=safe_date,
                 transcript=transcript_text.strip(),
             )
-            body = _openai_chat(SHORTY_SYSTEM_PROMPT, user_prompt, max_tokens=4096, temperature=0.2)
+            body = validate_shorty_body(
+                _openai_chat(SHORTY_SYSTEM_PROMPT, user_prompt, max_tokens=4096, temperature=0.2)
+            )
             header = (
                 f"SOURCE: {safe_title}\n"
                 f"CHANNEL: {safe_channel}\n"

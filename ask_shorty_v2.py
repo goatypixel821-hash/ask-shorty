@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from functools import lru_cache
@@ -330,8 +331,15 @@ def _collect_verification_excerpts(
 
 
 def _strip_thousands_separators(text: str) -> str:
-    """Join digit groups split by commas/spaces/etc. so 34,899 == 34899 for audits."""
-    return re.sub(r"(?<=\d)[,_\u00a0\u202f\s](?=\d)", "", text or "")
+    """
+    Join thousands groups so 34,899 == 34899 for audits.
+
+    Only a comma / underscore / (narrow) no-break space followed by exactly three
+    digits counts as a thousands separator. The old pattern also joined ordinary
+    whitespace and any digit run, so "March 14 2021" became "142021" and
+    "2019 450 people" became "2019450": false 'number not in context' flags.
+    """
+    return re.sub(r"(?<=\d)[,_\u00a0\u202f](?=\d{3}(?!\d))", "", text or "")
 
 
 def _normalize_phrase_for_match(text: str) -> str:
@@ -366,7 +374,8 @@ def _audit_answer_against_blob(
     if novel_nums:
         flags.append(numbers_flag_prefix + ",".join(novel_nums[:12]))
     blob_phrase_norm = _normalize_phrase_for_match(blob_raw)
-    for phrase in re.findall(r'"([^"]{8,80})"', answer or ""):
+    # Straight and curly double quotes (models often emit “…”).
+    for phrase in re.findall(r'["\u201c]([^"\u201c\u201d]{8,80})["\u201d]', answer or ""):
         pl = phrase.lower()
         if pl in blob_lower:
             continue
@@ -810,15 +819,26 @@ class AskShortyV2:
         self._ce: Any = None
 
     def _lazy_load(self) -> None:
-        if self._maps is not None:
-            return
-        self._maps = _get_shared_v2_memory_maps(self.db_path)
+        if self._maps is None:
+            self._maps = _get_shared_v2_memory_maps(self.db_path)
+        # Re-resolved on every call (cheap: a stat when unchanged) so rebuilt
+        # pickles are picked up without restarting the app.
         vpath = self.index_dir / "video_bm25_index.pkl"
         spath = self.index_dir / "segment_bm25_index.pkl"
         epath = self.index_dir / "event_bm25_index.pkl"
         self._video_bm25 = load_shared_bm25_index(vpath)
         self._seg_bm25 = load_shared_bm25_index(spath)
         self._evt_bm25 = load_shared_bm25_index(epath)
+        # A missing pickle used to make that retrieval layer silently empty.
+        missing = [p.name for p in (vpath, spath, epath) if not p.is_file()]
+        if missing and missing != getattr(self, "missing_indexes", None):
+            print(
+                f"[ask_shorty_v2] WARNING: V2 BM25 index file(s) missing in {self.index_dir}: "
+                f"{', '.join(missing)} — run populate_v2_indexes.py then v2_bm25.py",
+                file=sys.stderr,
+                flush=True,
+            )
+        self.missing_indexes = missing
 
     def _get_cross_encoder(self) -> Any:
         if self._ce is None:
@@ -975,6 +995,7 @@ class AskShortyV2:
             timing["cross_encoder_skipped"] = False
             timing["retrieve_total_ms"] = _ms_since(t_retrieve0)
             return [], {
+                "missing_v2_indexes": list(getattr(self, "missing_indexes", []) or []),
                 "route_type": route,
                 "route_reason": route_res.reason,
                 "topic_watch_sort": route_res.topic_watch_sort,
@@ -1212,6 +1233,7 @@ class AskShortyV2:
         timing["retrieve_total_ms"] = _ms_since(t_retrieve0)
 
         debug: Dict[str, Any] = {
+            "missing_v2_indexes": list(getattr(self, "missing_indexes", []) or []),
             "route_type": route,
             "route_reason": route_res.reason,
             "topic_watch_sort": route_res.topic_watch_sort,
@@ -1451,6 +1473,16 @@ class AskShortyV2:
         )
         dbg["timing_ms"] = _tim
         seg_by_vid: Dict[str, List[str]] = (dbg or {}).get("segment_hits") or {}
+        if dbg.get("missing_v2_indexes"):
+            _emit(
+                "warning",
+                label=(
+                    "V2 — index file(s) missing, retrieval degraded: "
+                    + ", ".join(dbg["missing_v2_indexes"])
+                    + " (run populate_v2_indexes.py, then v2_bm25.py)"
+                ),
+                missing=list(dbg["missing_v2_indexes"]),
+            )
 
         _emit(
             "step",
@@ -1748,7 +1780,12 @@ Videos included in context below (title | channel | watch date):
 
         # Part 2: non-blocking grounding audit (log/flag only — never rewrite).
         grounding_audit: List[str] = []
-        _append_v2_grounding_audit_flags(answer_text, user_p, grounding_audit)
+        # Audit against the evidence only. user_p also contains the question, so a
+        # number or phrase the user typed counted as "in context" even when no
+        # retrieved block supported it.
+        _append_v2_grounding_audit_flags(
+            answer_text, stats_block + "\n" + "\n---\n".join(blocks), grounding_audit
+        )
         dbg["grounding_audit"] = list(grounding_audit)
         if grounding_audit:
             _emit(

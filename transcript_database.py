@@ -23,7 +23,7 @@ class TranscriptDatabase:
 
     def ensure_db_exists(self):
         """Create database and tables if they don't exist; apply lightweight migrations safely."""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -330,9 +330,11 @@ class TranscriptDatabase:
                 """
             )
 
-            conn.execute("PRAGMA journal_mode=WAL")
-
+            # Commit the DDL / INSERT OR IGNORE rows first: SQLite refuses to change
+            # journal mode inside a transaction ("cannot change into wal mode from
+            # within a transaction"), which crashed every open of a non-WAL DB.
             conn.commit()
+            conn.execute("PRAGMA journal_mode=WAL")
             print(
                 f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"[OK] Transcript database ready: {self.db_path}"
@@ -349,10 +351,17 @@ class TranscriptDatabase:
                 cursor = conn.cursor()
                 # Use local time instead of UTC
                 local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Upsert, not INSERT OR REPLACE: REPLACE deletes the row first, which
+                # wiped json_metadata, local_path, watch_date and created_at whenever
+                # a video was re-grabbed.
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO videos (video_id, title, channel, url, created_at)
+                    INSERT INTO videos (video_id, title, channel, url, created_at)
                     VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(video_id) DO UPDATE SET
+                        title = excluded.title,
+                        channel = excluded.channel,
+                        url = excluded.url
                     """,
                     (video_id, title, channel, url, local_time),
                 )
@@ -605,7 +614,7 @@ class TranscriptDatabase:
                     WHERE id = (
                         SELECT id FROM transcripts
                         WHERE video_id = ?
-                        ORDER BY created_at DESC
+                        ORDER BY created_at DESC, id DESC
                         LIMIT 1
                     )
                     """,
@@ -622,7 +631,7 @@ class TranscriptDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
                 (video_id,),
             )
             result = cursor.fetchone()
@@ -637,7 +646,7 @@ class TranscriptDatabase:
                 SELECT text, shorty, shorty_generated_at
                 FROM transcripts
                 WHERE video_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
                 (video_id,),
@@ -754,7 +763,8 @@ class TranscriptDatabase:
                 obj = (t.get("object") or "").strip()
                 if not sub or not rel or not obj:
                     continue
-                conf = float(t.get("confidence", 1.0) or 1.0)
+                c_raw = t.get("confidence")
+                conf = 1.0 if c_raw is None else float(c_raw)  # keep an explicit 0.0
                 cursor.execute(
                     """
                     INSERT INTO facts (video_id, subject, relation, object, confidence, source)

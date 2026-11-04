@@ -5,12 +5,15 @@ HSC retrieval: route query, run targeted SQL + graph + vector + BM25, merge with
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import re
 from typing import Any, Dict, List, Optional
 
 from bm25_index import reciprocal_rank_fusion
 from hsc.query_router import route_query
+
+logger = logging.getLogger(__name__)
 
 
 def _tokens(q: str) -> List[str]:
@@ -100,19 +103,27 @@ def _vector_rank(
     question: str,
     n: int = 20,
     types: Optional[List[str]] = None,
+    embed_fn=None,
 ) -> List[str]:
+    """
+    ``embed_fn`` should be the indexing model's embedder (rag._embed_texts); without
+    it Chroma embeds the query with its own default model, which only matches the
+    index when the index was built with that same model.
+    """
     if collection is None:
         return []
     types = types or ["chunk", "shorty", "synthetic_question"]
     by_vid: Dict[str, float] = {}
+    q_emb = embed_fn([question]) if embed_fn is not None else None
     for st in types:
         try:
-            res = collection.query(
-                query_texts=[question],
-                n_results=n,
-                where={"type": st},
-            )
-        except Exception:
+            if q_emb is not None:
+                res = collection.query(query_embeddings=q_emb, n_results=n, where={"type": st})
+            else:
+                res = collection.query(query_texts=[question], n_results=n, where={"type": st})
+        except Exception as exc:
+            # Was a bare `continue`: a broken vector layer silently became an empty one.
+            logger.warning("HSC vector layer (type=%s) failed: %r", st, exc)
             continue
         metas = (res.get("metadatas") or [[]])[0]
         scores = (res.get("distances") or [[]])[0]
@@ -133,6 +144,7 @@ def hsc_retrieve(
     question: str,
     *,
     rag_collection=None,
+    embed_fn=None,
     bm25_search=None,
     enable_bm25: bool = False,
     enable_graph: bool = False,
@@ -176,7 +188,7 @@ def hsc_retrieve(
             pass
 
     hsc_rank = _rank_from_scores(hsc_scores)
-    vector_rank = _vector_rank(rag_collection, question, n=20)
+    vector_rank = _vector_rank(rag_collection, question, n=20, embed_fn=embed_fn)
 
     lists: List[List[str]] = []
     if hsc_rank:

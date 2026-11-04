@@ -83,16 +83,22 @@ def load_shared_bm25_index(index_path: Path | str) -> Optional["GenericBM25Index
     resolved = Path(index_path).resolve()
     key = str(resolved)
     with _bm25_singleton_lock:
-        hit = _bm25_loaded.get(key)
-        if hit is not None:
-            return hit
         if not resolved.is_file():
+            _bm25_loaded.pop(key, None)
             return None
+        st = resolved.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+        hit = _bm25_loaded.get(key)
+        # Cache is keyed on file identity too: before, a rebuilt pickle was never
+        # picked up by a running app (stale results until restart).
+        if hit is not None and getattr(hit, "_file_stamp", None) == stamp:
+            return hit
         inst = GenericBM25Index.__new__(GenericBM25Index)
         inst.index_path = resolved
         inst._bm25 = None
         inst._payload = {}
         inst._load()
+        inst._file_stamp = stamp
         _bm25_loaded[key] = inst
         return inst
 
