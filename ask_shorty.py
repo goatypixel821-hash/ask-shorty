@@ -33,21 +33,19 @@ if TYPE_CHECKING:
 
 def _load_shorty_dotenv() -> None:
     """Load ``shorty/.env`` so ASK_SHORTY_* vars apply (optional: pip install python-dotenv)."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=True)
+    import config
+
+    config.load_project_dotenv(override=True)
 
 
 _load_shorty_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ANSWER_MODEL = "claude-sonnet-4-20250514"
-ANSWER_MODEL = (os.environ.get("ANSWER_MODEL") or "").strip() or DEFAULT_ANSWER_MODEL
+import config as _config
+
+DEFAULT_ANSWER_MODEL = _config.DEFAULT_ANSWER_MODEL
+ANSWER_MODEL = _config.answer_model()
 MAX_SHORTIES_IN_CONTEXT = 10
 
 # ---------------------------------------------------------------------------
@@ -395,10 +393,9 @@ def _call_claude_answer(system_prompt: str, user_prompt: str) -> str:
 
 class AskShorty:
     def __init__(self):
-        self.db = TranscriptDatabase(
-            os.environ.get("ASK_SHORTY_DB_PATH")
-            or r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db"
-        )
+        # V1 reads the full library DB (ASK_SHORTY_FULL_DB_PATH / ASK_SHORTY_DB_PATH /
+        # local config / ~/Desktop/youtube-history-viewer-copy/data/transcripts.db).
+        self.db = TranscriptDatabase(str(_config.full_db_path()))
         # Lazy-init RAG so that any heavy Chroma / SentenceTransformer setup
         # happens only on first real query, not at import time.
         self._rag: Optional["TranscriptRAG"] = None

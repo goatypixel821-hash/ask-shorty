@@ -2,12 +2,13 @@
 """
 Library browser and admin panel for Ask Shorty.
 
-Runs as a standalone Flask app on port 5002.
-Connects directly to the existing SQLite DB at:
-  C:\\Users\\number2\\Desktop\\shorty\\data\\transcripts.db
+Runs as a standalone Flask app on port 5002 (127.0.0.1 unless ASK_SHORTY_HOST is set).
+Connects directly to the SQLite DB from config.db_path(): ASK_SHORTY_DB_PATH, else
+db_path in ask_shorty.local.toml, else <repo>/data/transcripts.db.
 """
 
 import os
+import sys
 import math
 import sqlite3
 from typing import List, Dict, Any, Optional
@@ -27,16 +28,17 @@ from entity_extractor import extract_entities, store_entities
 from transcript_database import TranscriptDatabase
 
 
-# Honour ASK_SHORTY_DB_PATH like every other module; the hard-coded repo path meant
-# the library browsed a different (often empty) DB than the Ask app.
-DB_PATH = os.environ.get("ASK_SHORTY_DB_PATH") or os.path.join(
-    os.path.dirname(__file__), "data", "transcripts.db"
-)
+import config
+
+# Same DB as the Ask app's job store and the grabber (config.db_path()); resolving a
+# path string reads env/config only, it doesn't touch the DB.
+DB_PATH = str(config.db_path())
 PAGE_SIZE = 50
 
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    # Fail with a clear message instead of letting sqlite create an empty DB.
+    conn = sqlite3.connect(config.require_db(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -616,5 +618,12 @@ def save_entity(video_id: str, entity_id: int):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5002, debug=False)
+    try:
+        config.require_db(DB_PATH)
+    except config.ConfigError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(config.EXIT_CONFIG)
+    host = config.host()
+    print(f"Library: http://{host}:5002/  (DB: {DB_PATH}; set ASK_SHORTY_HOST=0.0.0.0 to allow LAN access)")
+    app.run(host=host, port=5002, debug=False)
 

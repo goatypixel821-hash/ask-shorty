@@ -579,7 +579,9 @@ def _append_v2_request_html(
 
 
 def _resolve_db_path() -> str:
-    return os.environ.get("ASK_SHORTY_DB_PATH") or "data/transcripts.db"
+    import config
+
+    return str(config.db_path())
 
 
 def _corpus_shorty_counts(conn: sqlite3.Connection) -> Tuple[int, int]:
@@ -806,8 +808,11 @@ def _get_shared_v2_memory_maps(db_path: str) -> V2MemoryMaps:
 
 class AskShortyV2:
     def __init__(self, db_path: Optional[str] = None) -> None:
+        import config
+
         raw = db_path or _resolve_db_path()
-        self.db_path = _resolved_db_path(raw)
+        # sqlite3.connect() would silently create an empty DB at a wrong path.
+        self.db_path = _resolved_db_path(config.require_db(raw))
         self.index_dir = Path(
             os.environ.get("ASK_SHORTY_V2_INDEX_DIR") or default_v2_index_dir(self.db_path)
         ).resolve()

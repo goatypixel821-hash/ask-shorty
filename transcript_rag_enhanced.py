@@ -21,13 +21,9 @@ from typing import List, Dict, Tuple, Optional
 
 def _load_shorty_dotenv() -> None:
     """Load ``shorty/.env`` so ASK_SHORTY_* vars apply (optional: pip install python-dotenv)."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    env_path = Path(__file__).resolve().parent / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=True)
+    import config
+
+    config.load_project_dotenv(override=True)
 
 
 _load_shorty_dotenv()
@@ -74,30 +70,16 @@ class EnhancedTranscriptRAG:
     """Enhanced RAG system with chunking, hybrid search, and query expansion"""
     
     def __init__(self, transcript_db=None, chroma_dir=None, embedding_model_name=None):
-        # Get base directory relative to this script
-        base_dir = Path(__file__).parent
+        # Explicit args take priority, then config.py (env -> local toml -> default).
+        import config
 
-        # Explicit args take priority, then env vars, then defaults.
-        import os as _os
-        if transcript_db is None:
-            transcript_db = _os.environ.get("ASK_SHORTY_DB_PATH") or None
-        if chroma_dir is None:
-            chroma_dir = _os.environ.get("ASK_SHORTY_CHROMA_PATH") or None
-
-        if transcript_db is None:
-            self.transcript_db = Path(r"C:\Users\number2\Desktop\youtube-history-viewer-copy\data\transcripts.db")
-        else:
-            self.transcript_db = Path(transcript_db)
-            
-        if chroma_dir is None:
-            self.chroma_dir = base_dir / 'data' / 'transcript_chroma_finetuned'
-        else:
-            self.chroma_dir = Path(chroma_dir)
+        self.transcript_db = Path(transcript_db) if transcript_db is not None else config.full_db_path()
+        self.chroma_dir = Path(chroma_dir) if chroma_dir is not None else config.chroma_path()
 
         model_name = (embedding_model_name or "").strip() or None
         if model_name is None:
             sidecar = self.chroma_dir / "chroma_model.txt"  # type: ignore[attr-defined]
-            mf = base_dir / "data" / "chroma_model.txt"
+            mf = config.data_dir() / "chroma_model.txt"
             for path in (sidecar, mf):
                 if path.is_file():
                     try:

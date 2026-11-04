@@ -13,16 +13,10 @@ import os
 import sqlite3
 from pathlib import Path
 
-DEFAULT_DB = Path(__file__).resolve().parent / "data" / "transcripts.db"
-
-
 def resolve_db_path(cli: str | None) -> Path:
-    if cli:
-        return Path(cli)
-    env = (os.environ.get("ASK_SHORTY_DB_PATH") or "").strip()
-    if env:
-        return Path(env)
-    return DEFAULT_DB
+    import config
+
+    return Path(cli) if cli else config.db_path()
 
 
 def main() -> None:
