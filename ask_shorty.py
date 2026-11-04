@@ -441,6 +441,7 @@ class AskShorty:
         shorty_results: List[Dict[str, Any]],
         synq_results: List[Dict[str, Any]],
         hsc_rank: Optional[List[str]] = None,
+        restrict_videos: Optional[set] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
         """
         Merge vector layers with optional BM25 + graph using RRF; adjust scores for reranking.
@@ -449,6 +450,14 @@ class AskShorty:
         from bm25_index import reciprocal_rank_fusion
 
         vector_rank = self._vector_video_rank(chunk_results, shorty_results, synq_results)
+
+        # The caller's video_ids filter was applied to the vector layers only; BM25,
+        # graph and HSC hits outside it were fused back in and cited.
+        def _allowed(vid: str) -> bool:
+            return not restrict_videos or vid in restrict_videos
+
+        if hsc_rank:
+            hsc_rank = [v for v in hsc_rank if _allowed(v)]
         lists: List[List[str]] = []
         if hsc_rank:
             lists.append(hsc_rank)
@@ -461,7 +470,7 @@ class AskShorty:
         if ENABLE_BM25:
             try:
                 bm25 = self._get_bm25()
-                bm25_hits = bm25.search(question, top_k=RERANK_TOP_K_INPUT)
+                bm25_hits = [h for h in bm25.search(question, top_k=RERANK_TOP_K_INPUT) if _allowed(h["video_id"])]
                 lists.append([h["video_id"] for h in bm25_hits])
             except Exception as exc:
                 logger.warning("BM25 search failed: %s", exc)
@@ -471,7 +480,7 @@ class AskShorty:
                 from graph_search import GraphSearch
 
                 gs = GraphSearch(self.db.db_path)  # type: ignore[attr-defined]
-                graph_hits = gs.search(question, top_k=15)
+                graph_hits = [h for h in gs.search(question, top_k=15) if _allowed(h["video_id"])]
                 lists.append([h["video_id"] for h in graph_hits])
             except Exception as exc:
                 logger.warning("Graph search failed: %s", exc)
@@ -2534,7 +2543,8 @@ Given a natural language question, extract:
 
         if ENABLE_BM25 or ENABLE_GRAPH or ENABLE_HSC:
             chunk_results, shorty_results, synq_results, fusion_debug = self._apply_rrf_fusion(
-                q, chunk_results, shorty_results, synq_results, hsc_rank=hsc_rank
+                q, chunk_results, shorty_results, synq_results, hsc_rank=hsc_rank,
+                restrict_videos=set(video_ids) if video_ids else None,
             )
             if hsc_ctx:
                 fusion_debug["query_type"] = hsc_ctx.get("query_type")
