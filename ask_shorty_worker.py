@@ -12,6 +12,7 @@ Output: JSON object on stdout:
 or {"success": false, "error": "..."} on failure.
 """
 
+import contextlib
 import json
 import sys
 
@@ -34,8 +35,11 @@ def main() -> int:
         return 0
 
     try:
-        engine = AskShorty()
-        result = engine.answer_question(question, video_ids=video_ids)
+        # AskShorty / the RAG stack print progress to stdout ("[ask] ..."), which
+        # corrupted the one-JSON-object-on-stdout contract. Send it to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            engine = AskShorty()
+            result = engine.answer_question(question, video_ids=video_ids)
         out = {
             "success": True,
             "answer": result.get("answer", ""),

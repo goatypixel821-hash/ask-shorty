@@ -107,7 +107,9 @@ def _sqlite_connect(database_path: str) -> sqlite3.Connection:
     return conn
 
 
-_jobs_dir = Path(__file__).parent / "data" / "jobs"
+# Beside the DB, not in the repo: job ids are per-DB, so files from another (or a
+# reset) DB with the same id were "recovered" as the wrong job's answer.
+_jobs_dir = Path(str(db.db_path)).resolve().parent / "jobs"
 _jobs_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -297,18 +299,48 @@ _ensure_ref_id_column()
 _cleanup_stale_jobs()
 
 
-def _update_job(job_id: int, **fields) -> None:
-    """Helper to update a job row safely from worker thread."""
+_ACTIVE = ("pending", "running")
+
+
+def _update_job(job_id: int, expect: Optional[tuple] = None, **fields) -> bool:
+    """
+    Update a job row. With ``expect``, the write only happens if the row's current
+    status is one of ``expect`` (compare-and-set in a single UPDATE) and the return
+    value says whether it applied.
+
+    Every state change used to be check-then-write across separate connections, so
+    the worker and the polling endpoint could overwrite each other: a job marked
+    timeout/cancelled flipped back to completed, a just-completed job was turned
+    into error/timeout, and a worker exception overwrote 'cancelled'.
+    """
     if not fields:
-        return
+        return False
     conn = _sqlite_connect(str(db.db_path))  # type: ignore[attr-defined]
     cursor = conn.cursor()
     fields["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cols = ", ".join(f"{k} = ?" for k in fields.keys())
     values = list(fields.values()) + [job_id]
-    cursor.execute(f"UPDATE ask_jobs SET {cols} WHERE id = ?", values)
+    sql = f"UPDATE ask_jobs SET {cols} WHERE id = ?"
+    if expect:
+        sql += " AND status IN (%s)" % ",".join("?" * len(expect))
+        values += list(expect)
+    cursor.execute(sql, values)
+    applied = cursor.rowcount > 0
     conn.commit()
     conn.close()
+    return applied
+
+
+def _start_job_file(job_id: int) -> Path:
+    """Remove any leftover recovery file for this id (e.g. from a reset / other DB)."""
+    job_file = _jobs_dir / f"{job_id}.json"
+    try:
+        job_file.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[ask_jobs] could not clear stale job file {job_file}: {exc!r}")
+    return job_file
 
 
 def _make_emit(job_id: int):
@@ -328,7 +360,8 @@ def _run_job(job_id: int, question: str, video_ids):
     still recover the result from disk.
     """
     try:
-        _update_job(job_id, status="running")
+        _start_job_file(job_id)
+        _update_job(job_id, expect=_ACTIVE, status="running")
         engine = get_engine()
         result = engine.answer_question(
             question,
@@ -363,13 +396,16 @@ def _run_job(job_id: int, question: str, video_ids):
 
         print(f"[ask] Step F2: updating DB row for job_id={job_id}")
         ref_id = _allocate_ref_id()
-        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+        if not _update_job(job_id, expect=_ACTIVE, status="completed", answer=answer_json, error=None, ref_id=ref_id):
+            print(f"[ask_jobs] job_id={job_id} finished after it was cancelled/timed out; result discarded")
+            _start_job_file(job_id)
+            return
         print(f"[ask] Step F3: DB updated for job_id={job_id}, worker done ref_id={ref_id}")
     except Exception as e:
         q = _job_events.get(job_id)
         if q is not None:
             q.put({"type": "error", "message": str(e), "elapsed_ms": 0})
-        _update_job(job_id, status="error", error=str(e))
+        _update_job(job_id, expect=_ACTIVE, status="error", error=str(e))
     finally:
         # Signal SSE generator to close, then clean up the queue after a delay
         q = _job_events.get(job_id)
@@ -387,7 +423,8 @@ def _run_job(job_id: int, question: str, video_ids):
 def _run_job_v2(job_id: int, question: str, video_ids):
     """Background worker: Ask Shorty V2 hierarchical path only."""
     try:
-        _update_job(job_id, status="running")
+        _start_job_file(job_id)
+        _update_job(job_id, expect=_ACTIVE, status="running")
         engine = get_engine_v2()
         result = engine.answer(
             question,
@@ -421,12 +458,15 @@ def _run_job_v2(job_id: int, question: str, video_ids):
             v2_log_patch_ref_id(job_id, ref_id)
         except Exception:
             pass
-        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+        if not _update_job(job_id, expect=_ACTIVE, status="completed", answer=answer_json, error=None, ref_id=ref_id):
+            print(f"[ask_jobs] job_id={job_id} finished after it was cancelled/timed out; result discarded")
+            _start_job_file(job_id)
+            return
     except Exception as e:
         q = _job_events.get(job_id)
         if q is not None:
             q.put({"type": "error", "message": str(e), "elapsed_ms": 0})
-        _update_job(job_id, status="error", error=str(e))
+        _update_job(job_id, expect=_ACTIVE, status="error", error=str(e))
     finally:
         q = _job_events.get(job_id)
         if q is not None:
@@ -443,7 +483,8 @@ def _run_job_v2(job_id: int, question: str, video_ids):
 def _run_agent_job(job_id: int, question: str, video_ids, conversation_history=None):
     """Background worker: agentic tool loop (AskShorty with agent_mode=True)."""
     try:
-        _update_job(job_id, status="running")
+        _start_job_file(job_id)
+        _update_job(job_id, expect=_ACTIVE, status="running")
         engine = get_engine()
         result = engine.answer_question(
             question,
@@ -478,13 +519,16 @@ def _run_agent_job(job_id: int, question: str, video_ids, conversation_history=N
 
         print(f"[agent] Step F2: updating DB row for job_id={job_id}")
         ref_id = _allocate_ref_id()
-        _update_job(job_id, status="completed", answer=answer_json, error=None, ref_id=ref_id)
+        if not _update_job(job_id, expect=_ACTIVE, status="completed", answer=answer_json, error=None, ref_id=ref_id):
+            print(f"[ask_jobs] job_id={job_id} finished after it was cancelled/timed out; result discarded")
+            _start_job_file(job_id)
+            return
         print(f"[agent] Step F3: DB updated for job_id={job_id}, worker done ref_id={ref_id}")
     except Exception as e:
         q = _job_events.get(job_id)
         if q is not None:
             q.put({"type": "error", "message": str(e), "elapsed_ms": 0})
-        _update_job(job_id, status="error", error=str(e))
+        _update_job(job_id, expect=_ACTIVE, status="error", error=str(e))
     finally:
         q = _job_events.get(job_id)
         if q is not None:
@@ -1166,7 +1210,8 @@ def _api_agent_cancel_impl(job_id: int):
     ev = _job_cancel_events.get(job_id)
     if ev is not None:
         ev.set()
-    _update_job(job_id, status="cancelled", error="cancelled")
+    if not _update_job(job_id, expect=_ACTIVE, status="cancelled", error="cancelled"):
+        return jsonify({"success": False, "error": "Job already finished", "status": "finished", "job_id": job_id}), 409
     return jsonify({"success": True, "status": "cancelled", "job_id": job_id})
 
 
@@ -1266,7 +1311,9 @@ def api_ask_result(job_id: int):
             ev = _job_cancel_events.get(job_id)
             if ev is not None:
                 ev.set()
-            _update_job(job_id, status="error", error="timeout")
+            if not _update_job(job_id, expect=("running",), status="error", error="timeout"):
+                # The worker finished between our SELECT and UPDATE: report the real state.
+                return api_ask_result(job_id)
             return jsonify(
                 {
                     "success": False,
@@ -1304,6 +1351,7 @@ def api_ask_result(job_id: int):
             sync_ref = _allocate_ref_id()
             _update_job(
                 job_id,
+                expect=("error",),
                 status="completed",
                 answer=file_json,
                 error=None,
