@@ -115,8 +115,8 @@ def default_responder(system_prompt: str, user_prompt: str) -> str:
     if "JSON array of strings" in s and "alternative phrasings" in user_prompt:
         q = user_prompt.split("Original:", 1)[-1].strip()
         return json.dumps([" ".join(_tokens(q)), q.lower().rstrip("?")])
-    if "metadata" in s.lower() and ("channel" in s.lower() or "date" in s.lower()) and "Ask Shorty" not in s:
-        return "{}"
+    if '"channels"' in s and "date_from" in s:
+        return '{"channels": [], "date_from": null, "date_to": null}'
     if "compression engine" in s:
         return (
             "CONTEXT\nFake Shorty body produced by the test double.\n\n"

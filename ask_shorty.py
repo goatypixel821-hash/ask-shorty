@@ -496,11 +496,25 @@ class AskShorty:
                 parts.append("graph")
             return ",".join(parts) if parts else "vector"
 
+        # Fused scores must stay in the cosine-distance domain the rest of the
+        # pipeline assumes (lower is better, 0..2): the reranker normalises with
+        # 1 - score/2. The old value (-rrf + 0.01*dist) was negative, which pushed
+        # every group's retrieval term to ~1.01 and erased the fusion signal.
+        max_rrf = max(rrf_map.values()) if rrf_map else 0.0
+
+        def _fused_distance(vid: str, dist: float) -> float:
+            if max_rrf <= 0:
+                return dist
+            # Top fused video -> 0.0; tiny cosine tie-break keeps chunk order within a video.
+            return min(2.0, 2.0 * (1.0 - rrf_map[vid] / max_rrf) + 0.001 * max(0.0, dist))
+
         for r in chunk_results + shorty_results + synq_results:
             m = dict(r.get("metadata") or {})
             vid = m.get("video_id")
             if vid and vid in rrf_map:
-                r["score"] = -rrf_map[vid] + 0.01 * float(r.get("score", 1.0))
+                dist = float(r.get("score", 1.0))
+                m["vector_distance"] = dist
+                r["score"] = _fused_distance(vid, dist)
             if vid:
                 m["fusion_source"] = _prov(vid)
                 r["metadata"] = m
@@ -549,7 +563,7 @@ class AskShorty:
                 {
                     "id": f"{vid}:bm25:synth",
                     "text": best_text,
-                    "score": -rrf_map[vid],
+                    "score": _fused_distance(vid, 2.0),
                     "metadata": {
                         "video_id": vid,
                         "type": "chunk",
@@ -568,7 +582,7 @@ class AskShorty:
                 {
                     "id": f"{vid}:graph:synth",
                     "text": h.get("text_preview") or "",
-                    "score": -rrf_map[vid],
+                    "score": _fused_distance(vid, 2.0),
                     "metadata": {
                         "video_id": vid,
                         "type": "chunk",
@@ -578,6 +592,11 @@ class AskShorty:
                 }
             )
             synth_added.add(vid)
+
+        # Re-sort so callers that slice [:top_k] (the default no-rerank path) see
+        # the fused order; previously they silently kept the raw cosine order.
+        for lst in (chunk_results, shorty_results, synq_results):
+            lst.sort(key=lambda x: float(x.get("score", 2.0)))
 
         preview = [
             {"video_id": vid, "rrf": round(sc, 5), "sources": _prov(vid)}
