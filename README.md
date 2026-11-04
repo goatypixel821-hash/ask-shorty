@@ -166,6 +166,20 @@ set OPENAI_BASE_URL=http://localhost:8000/v1
 set OPENAI_MODEL=qwen2.5:14b
 ```
 
+### 2b. Configure paths (optional) and create the database
+
+Paths, provider and model ids come from `config.py`: environment variable (or `.env`) → `ask_shorty.local.toml` → built-in default. Run `python config.py` to see every effective value and where it came from.
+
+- Defaults: working DB `data/transcripts.db` in this repo; full-library DB `~/Desktop/youtube-history-viewer-copy/data/transcripts.db` if it exists, otherwise the working DB.
+- To pin or change them, copy `ask_shorty.local.toml.example` to `ask_shorty.local.toml` (gitignored) and edit it.
+- **A missing database is an error**, not a silently created empty file. On a fresh install, create one on purpose:
+
+```bash
+python config.py init-db            # creates the configured db_path
+```
+
+The apps (5000 grabber, 5001 Ask, 5002 library) listen on **127.0.0.1** only. To reach them from your phone or another machine on the LAN, set `ASK_SHORTY_HOST=0.0.0.0` (in `.env` or the shell) or `host = "0.0.0.0"` in `ask_shorty.local.toml`. They have no authentication.
+
 ### 3. Start the grabber and add videos
 
 ```bash
