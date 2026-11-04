@@ -617,7 +617,7 @@ def save_entity(video_id: str, entity_id: int):
     return redirect(url_for("video_detail_view", video_id=video_id))
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         config.require_db(DB_PATH)
     except config.ConfigError as e:
@@ -626,4 +626,8 @@ if __name__ == "__main__":
     host = config.host()
     print(f"Library: http://{host}:5002/  (DB: {DB_PATH}; set ASK_SHORTY_HOST=0.0.0.0 to allow LAN access)")
     app.run(host=host, port=5002, debug=False)
+
+
+if __name__ == "__main__":
+    main()
 

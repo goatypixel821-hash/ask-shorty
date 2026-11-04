@@ -29,7 +29,7 @@ for _k in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
 # each test that needs a DB points ASK_SHORTY_DB_PATH (etc.) at its own temp copy.
 import tempfile as _tempfile
 
-for _k in ("ASK_SHORTY_DB_PATH", "ASK_SHORTY_FULL_DB_PATH", "ASK_SHORTY_CHROMA_PATH",
+for _k in ("ASK_SHORTY_DB_PATH", "ASK_SHORTY_FULL_DB_PATH", "ASK_SHORTY_FULL_DB", "ASK_SHORTY_CHROMA_PATH",
            "ASK_SHORTY_FULL_CHROMA_PATH", "ASK_SHORTY_DATA_DIR", "ASK_SHORTY_CREATE_DB",
            "SHORTY_PROVIDER", "SHORTY_MODEL", "ANSWER_MODEL", "OPENROUTER_MODEL", "ASK_SHORTY_HOST"):
     os.environ.pop(_k, None)
@@ -37,6 +37,8 @@ os.environ["ASK_SHORTY_NO_DOTENV"] = "1"
 _EMPTY_CONFIG = Path(_tempfile.mkdtemp(prefix="ask-shorty-cfg-")) / "empty.toml"
 _EMPTY_CONFIG.write_text("", encoding="utf-8")
 os.environ["ASK_SHORTY_CONFIG"] = str(_EMPTY_CONFIG)
+# grab_log.txt, downloads, clusters.json ... go here, never into the repo's data/.
+os.environ["ASK_SHORTY_DATA_DIR"] = str(_EMPTY_CONFIG.parent / "data")
 # Feature flags the tests rely on being off unless a test turns them on.
 for _k in ("ASK_SHORTY_RERANK", "ASK_SHORTY_GRAPH", "ASK_SHORTY_HSC", "ASK_SHORTY_AGENT", "ASK_SHORTY_V2_VERIFY"):
     os.environ.pop(_k, None)
