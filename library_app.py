@@ -27,7 +27,11 @@ from entity_extractor import extract_entities, store_entities
 from transcript_database import TranscriptDatabase
 
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "transcripts.db")
+# Honour ASK_SHORTY_DB_PATH like every other module; the hard-coded repo path meant
+# the library browsed a different (often empty) DB than the Ask app.
+DB_PATH = os.environ.get("ASK_SHORTY_DB_PATH") or os.path.join(
+    os.path.dirname(__file__), "data", "transcripts.db"
+)
 PAGE_SIZE = 50
 
 
