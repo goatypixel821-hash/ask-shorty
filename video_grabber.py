@@ -16,26 +16,27 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-if sys.platform == 'win32':
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
-    os.environ['PYTHONUNBUFFERED'] = '1'
-    if hasattr(sys.stdout, 'reconfigure'):
-        try:
-            sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-            sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
-        except Exception:
-            pass
+
+def _configure_console() -> None:
+    """UTF-8, line-buffered console on Windows (was done at import; now in main())."""
+    if sys.platform == 'win32':
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+        os.environ['PYTHONUNBUFFERED'] = '1'
+        if hasattr(sys.stdout, 'reconfigure'):
+            try:
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+                sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+            except Exception:
+                pass
+
 
 from flask import Flask, jsonify, request, render_template, redirect
 import sqlite3
 
+import config
 from transcript_database import TranscriptDatabase
 from transcript_rag import TranscriptRAG
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -51,9 +52,12 @@ def after_request(response):
     return response
 
 base_dir = Path(__file__).resolve().parent
-grab_log_path = base_dir / 'data' / 'grab_log.txt'
 
-_DEFAULT_OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct"
+_DEFAULT_OPENROUTER_MODEL = config.DEFAULT_OPENROUTER_MODEL
+
+
+def _grab_log_path() -> Path:
+    return config.data_dir() / 'grab_log.txt'
 
 
 def _out(msg: str) -> None:
@@ -64,8 +68,9 @@ def _out(msg: str) -> None:
     except Exception:
         pass
     try:
-        grab_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(grab_log_path, 'a', encoding='utf-8') as f:
+        log_path = _grab_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, 'a', encoding='utf-8') as f:
             f.write(line)
             f.flush()
     except Exception:
@@ -76,19 +81,17 @@ def _resolve_db_path() -> tuple[Path, str]:
     """
     Pick the SQLite file the grabber uses.
 
-    Priority (after .env is loaded):
+    Priority (after .env is loaded), via config.db_path():
     1. ASK_SHORTY_DB_PATH env var (from shell or .env)
-    2. <directory containing this video_grabber.py>/data/transcripts.db
+    2. db_path in ask_shorty.local.toml
+    3. <data_dir>/transcripts.db (data_dir defaults to <this repo>/data)
 
     Note: SHORTY_PROJECT_ROOT does not select the DB directly; it only helps load
     shorty's .env and resolve batch_processor.py when the grabber script is run
     from another checkout (e.g. youtube-history-viewer-copy).
     """
-    env_raw = (os.environ.get("ASK_SHORTY_DB_PATH") or "").strip()
-    if env_raw:
-        return Path(env_raw).resolve(), "ASK_SHORTY_DB_PATH"
-    default = (base_dir / "data" / "transcripts.db").resolve()
-    return default, "base_dir/data/transcripts.db (next to this video_grabber.py)"
+    value, source = config.resolve("db_path")
+    return Path(value).resolve(), source
 
 
 def _log_db_path_resolution(db_path: Path, db_path_source: str) -> None:
@@ -125,6 +128,8 @@ def _load_project_dotenv() -> None:
     - .env in the process current working directory (e.g. youtube-history-viewer-copy)
     - .env under SHORTY_PROJECT_ROOT if set (explicit shorty checkout)
     """
+    if (os.environ.get("ASK_SHORTY_NO_DOTENV") or "").strip().lower() in ("1", "true", "yes", "on"):
+        return
     try:
         from dotenv import load_dotenv
     except ImportError:
@@ -145,10 +150,32 @@ def _load_project_dotenv() -> None:
         load_dotenv(env_path, override=False)
 
 
-_load_project_dotenv()
+_env_lock = threading.Lock()
+_env_loaded = False
 
-db_path, _db_path_source = _resolve_db_path()
-_log_db_path_resolution(db_path, _db_path_source)
+
+def _ensure_env() -> None:
+    global _env_loaded
+    if _env_loaded:
+        return
+    with _env_lock:
+        if not _env_loaded:
+            _load_project_dotenv()
+            _env_loaded = True
+
+
+# Resolved on first use (or by init_grabber()), not at import.
+db_path: Optional[Path] = None
+_db_path_source = ""
+
+
+def _get_db_path() -> Path:
+    global db_path, _db_path_source
+    if db_path is None:
+        _ensure_env()
+        db_path, _db_path_source = _resolve_db_path()
+    return db_path
+
 
 try:
     from local_yt_dlp_fetcher import VideoDownloader, YT_DLP_AVAILABLE
@@ -158,8 +185,13 @@ except ImportError:
     _LOCAL_YT_DLP_AVAILABLE = False
 
 _local_video_downloader = None
-if _LOCAL_YT_DLP_AVAILABLE and VideoDownloader is not None:
-    _local_video_downloader = VideoDownloader(str(base_dir / 'data' / 'downloads'))
+
+
+def _get_local_video_downloader():
+    global _local_video_downloader
+    if _local_video_downloader is None and _LOCAL_YT_DLP_AVAILABLE and VideoDownloader is not None:
+        _local_video_downloader = VideoDownloader(str(config.data_dir() / 'downloads'))
+    return _local_video_downloader
 
 
 def _openrouter_key_status_line() -> str:
@@ -219,12 +251,23 @@ def _log_startup_openrouter_and_batch() -> None:
     _out(line)
 
 
-db = TranscriptDatabase(str(db_path))
-rag = TranscriptRAG()
+# Opened on first use / by init_grabber(). Importing this module used to load the
+# embedding model, create data/transcripts.db and write data/grab_log.txt.
+db = config.Lazy(lambda: TranscriptDatabase(str(_get_db_path())))
+rag = config.Lazy(lambda: TranscriptRAG())
 
-logger.info("Video Grabber Service initialized")
-logger.info(f"Database: {db_path}")
-_log_startup_openrouter_and_batch()
+
+def init_grabber() -> None:
+    """Startup work that used to run at import (called by main())."""
+    _ensure_env()
+    path = _get_db_path()
+    _log_db_path_resolution(path, _db_path_source)
+    _get_local_video_downloader()
+    db._target()   # opens the DB: raises config.DatabaseNotFoundError if it's missing
+    rag._target()  # load the embedding model now, not on the first grab
+    logger.info("Video Grabber Service initialized")
+    logger.info(f"Database: {path}")
+    _log_startup_openrouter_and_batch()
 
 
 def _extract_video_id(url: str):
@@ -237,7 +280,7 @@ def _extract_video_id(url: str):
 def vectorize_video_in_background(video_id: str):
     def do_vectorize():
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = sqlite3.connect(str(_get_db_path()))
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT text FROM transcripts WHERE video_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -268,14 +311,15 @@ def enqueue_llm_tasks_for_video(video_id: str):
 
 
 def _openrouter_model_name() -> str:
-    v = (os.environ.get("OPENROUTER_MODEL") or "").strip()
-    return v or _DEFAULT_OPENROUTER_MODEL
+    _ensure_env()
+    return config.openrouter_model()
 
 
 def _append_batch_processor_log(header: str, proc: subprocess.CompletedProcess) -> None:
     try:
-        grab_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(grab_log_path, "a", encoding="utf-8") as gf:
+        log_path = _grab_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as gf:
             gf.write(header + "\n")
             if proc.stdout:
                 gf.write(proc.stdout)
@@ -295,7 +339,7 @@ def _run_batch_processor_subprocess(bp_args: list) -> subprocess.CompletedProces
             stdout="",
             stderr="batch_processor.py not found",
         )
-    cmd = [sys.executable, str(script), "--db-path", str(db_path.resolve())] + bp_args
+    cmd = [sys.executable, str(script), "--db-path", str(_get_db_path().resolve())] + bp_args
     return subprocess.run(
         cmd,
         cwd=str(script.parent),
@@ -457,11 +501,12 @@ def _strip_timestamps_from_paste(text: str) -> str:
 
 def _fetch_local_metadata(url: str) -> Optional[dict]:
     """Fetch rich metadata via local yt-dlp module (personal use only)."""
-    if not _local_video_downloader:
+    downloader = _get_local_video_downloader()
+    if not downloader:
         return None
     try:
         _out("🔍 Fetching metadata...")
-        metadata = _local_video_downloader.fetch_metadata(url, quiet=True)
+        metadata = downloader.fetch_metadata(url, quiet=True)
         if metadata:
             desc_len = len(metadata.get('description', '') or '')
             tags_count = len(metadata.get('tags', []) or [])
@@ -679,7 +724,7 @@ def api_fetch_transcript():
 
         logger.info(f"📥 Grabbing video: {video_id} - {title}")
 
-        fetcher = SimpleTranscriptFetcher(str(db_path))
+        fetcher = SimpleTranscriptFetcher(str(_get_db_path()))
         _out("🔍 Fetching transcript...")
         result = fetcher.fetch_transcript_from_url(url, title, channel)
         transcript_success = bool(result.get('success'))
@@ -896,14 +941,14 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'video_grabber',
-        'database': str(db_path.exists())
+        'database': str(_get_db_path().exists())
     })
 
 
 @app.route('/api/status', methods=['GET'])
 def status():
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM videos")
         video_count = cursor.fetchone()[0]
@@ -914,18 +959,31 @@ def status():
             'status': 'running',
             'videos': video_count,
             'transcripts': transcript_count,
-            'database': str(db_path)
+            'database': str(_get_db_path())
         })
     except Exception as e:
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
-if __name__ == '__main__':
+def main() -> None:
+    _configure_console()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    try:
+        init_grabber()
+    except config.ConfigError as e:
+        print(f"ERROR: {e}", file=sys.stderr, flush=True)
+        sys.exit(config.EXIT_CONFIG)
+    db_path = _get_db_path()
     port = int(os.getenv('GRABBER_PORT', 5000))
+    host = config.host()
     print("\n" + "=" * 60)
     print("Video Grabber Service")
     print("=" * 60)
     print(f"Port: {port}")
+    print(f"Host: {host}" + ("  (this machine only; set ASK_SHORTY_HOST=0.0.0.0 for LAN access)" if host == "127.0.0.1" else ""))
     print(f"Database: {db_path.resolve()} ({_db_path_source})")
     if _LOCAL_YT_DLP_AVAILABLE:
         print("Auto-fetch: enabled (local_yt_dlp_fetcher.py)")
@@ -938,4 +996,8 @@ if __name__ == '__main__':
     print("Use the Library and Ask UIs (ports 5002 / 5001) for browsing and search.")
     print("=" * 60 + "\n")
     logger.info(f"Starting Video Grabber Service on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host=host, port=port, debug=False)
+
+
+if __name__ == '__main__':
+    main()

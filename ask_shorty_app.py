@@ -95,7 +95,11 @@ def get_engine_v2():
     return _engine_v2
 
 
-db = TranscriptDatabase()
+import config
+
+# Working DB (job store, live counts). Opened on first use, not at import, so importing
+# this module doesn't create files; a missing DB fails loudly (config.DatabaseNotFoundError).
+db = config.Lazy(lambda: TranscriptDatabase(str(config.db_path())))
 
 # SQLite: wait on busy locks + WAL for concurrent app + batch workers.
 _SQLITE_BUSY_TIMEOUT_SEC = 30.0
@@ -109,27 +113,30 @@ def _sqlite_connect(database_path: str) -> sqlite3.Connection:
 
 # Beside the DB, not in the repo: job ids are per-DB, so files from another (or a
 # reset) DB with the same id were "recovered" as the wrong job's answer.
-_jobs_dir = Path(str(db.db_path)).resolve().parent / "jobs"
-_jobs_dir.mkdir(parents=True, exist_ok=True)
+# Tests (and init_app) may set this; otherwise it's derived from the DB on first use.
+_jobs_dir: Optional[Path] = None
+
+
+def _get_jobs_dir() -> Path:
+    global _jobs_dir
+    if _jobs_dir is None:
+        _jobs_dir = Path(str(db.db_path)).resolve().parent / "jobs"
+    _jobs_dir.mkdir(parents=True, exist_ok=True)
+    return _jobs_dir
 
 
 def _startup_storage_diagnostic() -> None:
     """
     Print effective storage locations at startup (similar to grabber diagnostic).
     """
-    base_dir = Path(__file__).resolve().parent
-    db_raw = getattr(db, "db_path", os.environ.get("ASK_SHORTY_DB_PATH") or "")
-    db_path_eff = str(Path(str(db_raw)).resolve()) if str(db_raw).strip() else str((base_dir / "data" / "transcripts.db").resolve())
-    chroma_raw = (os.environ.get("ASK_SHORTY_CHROMA_PATH") or "").strip()
-    chroma_eff = chroma_raw or str((base_dir / "data" / "transcript_chroma_finetuned").resolve())
+    db_path_eff = str(Path(str(db.db_path)).resolve())
+    chroma_eff = str(config.chroma_path().resolve())
     line = (
-        "[ask-shorty-app] db_path=%s | chroma_path=%s | cwd=%s"
-        % (db_path_eff, chroma_eff, str(Path.cwd().resolve()))
+        "[ask-shorty-app] db_path=%s | full_db_path=%s | chroma_path=%s | cwd=%s"
+        % (db_path_eff, config.full_db_path(), chroma_eff, str(Path.cwd().resolve()))
     )
     print(line, flush=True)
 
-
-_startup_storage_diagnostic()
 
 
 def _warm_v2_in_background() -> None:
@@ -151,8 +158,6 @@ def _warm_v2_in_background() -> None:
 
     threading.Thread(target=_run, daemon=True, name="v2-warmup").start()
 
-
-_warm_v2_in_background()
 
 # Per-job SSE event queues.  Created in api_ask before the worker thread
 # starts so a client can connect immediately and receive every event.
@@ -294,10 +299,6 @@ def _cleanup_stale_jobs() -> None:
     conn.close()
 
 
-_ensure_jobs_table()
-_ensure_ref_id_column()
-_cleanup_stale_jobs()
-
 
 _ACTIVE = ("pending", "running")
 
@@ -333,7 +334,7 @@ def _update_job(job_id: int, expect: Optional[tuple] = None, **fields) -> bool:
 
 def _start_job_file(job_id: int) -> Path:
     """Remove any leftover recovery file for this id (e.g. from a reset / other DB)."""
-    job_file = _jobs_dir / f"{job_id}.json"
+    job_file = _get_jobs_dir() / f"{job_id}.json"
     try:
         job_file.unlink()
     except FileNotFoundError:
@@ -385,7 +386,7 @@ def _run_job(job_id: int, question: str, video_ids):
             }
         )
         # Write to disk first so it survives a later crash
-        job_file = _jobs_dir / f"{job_id}.json"
+        job_file = _get_jobs_dir() / f"{job_id}.json"
         try:
             print(f"[ask] Step F1: writing job file for job_id={job_id} -> {job_file}")
             job_file.write_text(answer_json, encoding="utf-8")
@@ -446,7 +447,7 @@ def _run_job_v2(job_id: int, question: str, video_ids):
                 "verification_excerpts": result.get("verification_excerpts", []),
             }
         )
-        job_file = _jobs_dir / f"{job_id}.json"
+        job_file = _get_jobs_dir() / f"{job_id}.json"
         try:
             job_file.write_text(answer_json, encoding="utf-8")
         except Exception as file_err:
@@ -509,7 +510,7 @@ def _run_agent_job(job_id: int, question: str, video_ids, conversation_history=N
                 "debug_events": result.get("debug_events", []),
             }
         )
-        job_file = _jobs_dir / f"{job_id}.json"
+        job_file = _get_jobs_dir() / f"{job_id}.json"
         try:
             print(f"[agent] Step F1: writing job file for job_id={job_id} -> {job_file}")
             job_file.write_text(answer_json, encoding="utf-8")
@@ -569,7 +570,11 @@ def agent_page():
 # ── Knowledge Observatory ─────────────────────────────────────────────────────
 
 _CLUSTERS_PATH = Path(__file__).parent / "data" / "clusters.json"
-_FULL_DB = os.environ.get("ASK_SHORTY_DB_PATH") or "C:/Users/number2/Desktop/youtube-history-viewer-copy/data/transcripts.db"
+
+
+def _full_db() -> str:
+    """Full-library DB for the observatory (config.full_db_path(); must exist)."""
+    return config.require_db(config.full_db_path())
 
 
 def _load_clusters():
@@ -594,7 +599,7 @@ def api_observatory_overview():
 
     # Pull live counts from the full corpus DB
     try:
-        conn = _sqlite_connect(str(_FULL_DB))
+        conn = _sqlite_connect(_full_db())
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM videos")
         total_videos = c.fetchone()[0]
@@ -655,7 +660,7 @@ def api_observatory_timeline():
         # Fall back to raw video dates from DB
         all_videos = []
         try:
-            conn = _sqlite_connect(str(_FULL_DB))
+            conn = _sqlite_connect(_full_db())
             c = conn.cursor()
             c.execute("SELECT video_id, watch_date FROM videos WHERE watch_date IS NOT NULL")
             all_videos = [{"video_id": r[0], "watch_date": r[1][:10], "cluster_id": -2}
@@ -1337,7 +1342,7 @@ def api_ask_result(job_id: int):
     # SQLite, the row can be left as "error". Only then read the job file —
     # never when status is still "pending" or "running", or a stale file from
     # an earlier run (same job_id) can be mistaken for the current job.
-    job_file = _jobs_dir / f"{job_id}.json"
+    job_file = _get_jobs_dir() / f"{job_id}.json"
     print(f"[ask_jobs] job_id={job_id} job_file={job_file} exists={job_file.exists()}")
     err_lower = (error_text or "").strip().lower()
     if status == "error" and job_file.exists() and err_lower != "timeout":
@@ -1846,9 +1851,48 @@ def _api_json_not_found(e):
     return e
 
 
-_log_registered_api_routes()
+_init_lock = threading.Lock()
+_initialized = False
+
+
+def init_app(*, warm_v2: bool = True) -> None:
+    """
+    Startup work that used to run at import: open the DB (fails loudly if it's
+    missing), create the jobs table, mark crashed jobs, warm V2, log routes.
+    Called by ``python ask_shorty_app.py``; call it yourself when serving ``app``
+    some other way. Idempotent.
+    """
+    global _initialized
+    with _init_lock:
+        if _initialized:
+            return
+        _startup_storage_diagnostic()
+        _get_jobs_dir()
+        _ensure_jobs_table()
+        _ensure_ref_id_column()
+        _cleanup_stale_jobs()
+        if warm_v2:
+            _warm_v2_in_background()
+        _log_registered_api_routes()
+        _initialized = True
+
+
+def main() -> None:
+    try:
+        init_app()
+    except config.ConfigError as e:
+        print(f"ERROR: {e}", flush=True)
+        raise SystemExit(config.EXIT_CONFIG)
+    host = config.host()
+    print(
+        f"[ask-shorty-app] listening on http://{host}:5001/"
+        + ("" if host != "127.0.0.1" else "  (this machine only; set ASK_SHORTY_HOST=0.0.0.0 for LAN/phone access)"),
+        flush=True,
+    )
+    # Disable the Flask reloader on Windows to avoid noisy socket errors.
+    app.run(host=host, port=5001, debug=False, use_reloader=False, threaded=True)
+
 
 if __name__ == "__main__":
-    # Disable the Flask reloader on Windows to avoid noisy socket errors.
-    app.run(host="0.0.0.0", port=5001, debug=False, use_reloader=False, threaded=True)
+    main()
 

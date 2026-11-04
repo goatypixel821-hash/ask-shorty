@@ -181,8 +181,11 @@ def test_crash_recovery_from_job_file_still_works(app):
     assert res["status"] == "completed" and res["answer"] == "recovered"
 
 
-def test_jobs_dir_lives_beside_the_db(app_module):
-    assert Path(app_module._jobs_dir).parent == Path(app_module.db.db_path).resolve().parent
+def test_jobs_dir_lives_beside_the_db(app_module, corpus_copy, monkeypatch):
+    monkeypatch.setattr(app_module, "db", TranscriptDatabase(corpus_copy["db_path"]))
+    monkeypatch.setattr(app_module, "_jobs_dir", None)
+    jobs = app_module._get_jobs_dir()
+    assert jobs.is_dir() and jobs.parent == Path(corpus_copy["db_path"]).resolve().parent
 
 
 # --------------------------------------------------------------------------- worker script
