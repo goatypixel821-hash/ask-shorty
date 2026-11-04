@@ -100,7 +100,9 @@ class EvidenceGroup:
     source_hits: List[RetrievalHit] = field(default_factory=list)
     support_count: int = 0
     support_types: List[str] = field(default_factory=list)  # unique source types
-    best_retrieval_score: float = 1.0           # lower is better (cosine distance)
+    # lower is better (cosine distance, 0..2). Starts at +inf: a 1.0 default meant
+    # groups whose hits were all >1.0 reported 1.0 and kept the first hit's text.
+    best_retrieval_score: float = float("inf")
     chunk_ids: List[str] = field(default_factory=list)
 
     # Text fields populated after neighbour expansion
@@ -538,7 +540,8 @@ class Reranker:
                 "center_chunk_index": g.center_chunk_index,
                 "support_count": g.support_count,
                 "support_types": g.support_types,
-                "best_retrieval_score": round(g.best_retrieval_score, 4),
+                "best_retrieval_score": round(g.best_retrieval_score, 4)
+                if math.isfinite(g.best_retrieval_score) else None,
                 "rerank_score": round(g.rerank_score, 4),
                 "final_score": round(g.final_score, 4),
                 "chunk_ids": g.chunk_ids,
