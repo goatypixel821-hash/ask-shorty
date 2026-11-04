@@ -763,7 +763,8 @@ class TranscriptDatabase:
                 obj = (t.get("object") or "").strip()
                 if not sub or not rel or not obj:
                     continue
-                conf = float(t.get("confidence", 1.0) or 1.0)
+                c_raw = t.get("confidence")
+                conf = 1.0 if c_raw is None else float(c_raw)  # keep an explicit 0.0
                 cursor.execute(
                     """
                     INSERT INTO facts (video_id, subject, relation, object, confidence, source)
